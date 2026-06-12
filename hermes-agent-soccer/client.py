@@ -70,6 +70,42 @@ def clear_state() -> None:
     save_state({})
 
 
+# ── human-editable strategy (Phase 5) ────────────────────────────────────────
+# A markdown file the manager edits between/while matches; injected into the
+# decision prompt. mtime-cached so we don't re-read on every tick, refreshed when
+# the file changes, capped so it can't blow the prompt.
+STRATEGY_CAP = 1000
+_strategy_cache: Dict[str, Any] = {}  # path -> {"mtime": float, "text": str}
+
+
+def _strategy_path() -> Path:
+    explicit = os.getenv("AGENTNET_SOCCER_STRATEGY_FILE")
+    if explicit and explicit.strip():
+        return Path(explicit.strip())
+    return _hermes_home() / "agent-soccer" / "strategy.md"
+
+
+def strategy() -> str:
+    """The manager's standing instructions, mtime-cached and capped. Returns ''
+    when the file is absent/unreadable (no block injected)."""
+    p = _strategy_path()
+    key = str(p)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        _strategy_cache.pop(key, None)
+        return ""
+    cached = _strategy_cache.get(key)
+    if cached and cached["mtime"] == mtime:
+        return cached["text"]
+    try:
+        text = p.read_text("utf-8").strip()[:STRATEGY_CAP]
+    except OSError:
+        return ""
+    _strategy_cache[key] = {"mtime": mtime, "text": text}
+    return text
+
+
 def team_handle() -> str:
     """A stable self-asserted agent id for no-auth/demo servers. Prefer an
     explicit AGENTNET_SOCCER_TEAM; else a sticky id derived from the host."""

@@ -24,4 +24,6 @@ pkg = types.ModuleType("hsoccer")
 pkg.__path__ = [str(PKG_DIR)]
 sys.modules["hsoccer"] = pkg
 client = _load("hsoccer.client", "client.py")
+decide = _load("hsoccer.decide", "decide.py")
+watcher = _load("hsoccer.watcher", "watcher.py")
 tools = _load("hsoccer.tools", "tools.py")

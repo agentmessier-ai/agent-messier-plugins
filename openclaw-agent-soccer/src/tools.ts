@@ -29,10 +29,73 @@ export type PluginCfg = {
   nation?: string; // ISO code like NL/IT/CN → flag shown in the viewer
   clan?: string;   // e.g. 魔兽工会-style guild tag
   style?: string;  // playing identity, e.g. 全攻全守 total football — shapes play
+  /** Path to a human-editable strategy.md injected into the watcher move prompt
+   *  (Phase 5). Capped ~1k chars, mtime-cached so edits apply mid-match. */
+  strategyFile?: string;
 };
 
 export function identityOf(cfg: PluginCfg): Record<string, unknown> {
   return { name: cfg.teamName, nation: cfg.nation, clan: cfg.clan, style: cfg.style };
+}
+
+// ── /spec manifest (Phase 4 — generate tools from the published action schema) ──
+/** The slice of GET /spec this plugin consumes: the published action vocabulary. */
+export type GameSpec = {
+  game: string;
+  specVersion: number;
+  rulesVersion: number;
+  actions: { type: "string"; enum: string[]; descriptions?: Record<string, string> };
+  /** The self-instructable envelope — how to play, server-authored, frozen per
+   *  match. Optional: absent on pre-envelope servers (fallback prompt used). */
+  instructions?: { system: string; play: string; output: string };
+};
+
+// STATIC FALLBACK vocabularies — used when /spec is unreachable (offline-safe).
+// `ADVANCED_ACTIONS` is also the classifier that splits a manifest's enum into
+// the easy tier (server computes geometry) vs the advanced tier (agent does).
+const EASY_ACTIONS = ["chase", "shoot", "dribble", "pass", "defend", "press", "cover", "stop"];
+const ADVANCED_ACTIONS = ["run", "kick", "stop"];
+
+/** Fetch GET /spec (the game manifest). Returns null when unreachable or
+ *  malformed so callers fall back to the static vocabulary (offline-safe). */
+export async function fetchSpec(cfg: PluginCfg): Promise<GameSpec | null> {
+  const base = (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/spec`);
+    if (!res.ok) return null;
+    const spec = (await res.json()) as GameSpec;
+    if (!spec || typeof spec !== "object" || !Array.isArray(spec.actions?.enum)) return null;
+    return spec;
+  } catch { return null; }
+}
+
+/** Per-match spec snapshot with the protection ladder (self-instructable-
+ *  observation.md): the match's frozen snapshot first, then server-current
+ *  /spec (pre-snapshot servers), then null — the caller stays on its static
+ *  fallback and retries on a later tick (degraded, never permanently). */
+export async function fetchMatchSpec(cfg: PluginCfg, matchId: string): Promise<GameSpec | null> {
+  const base = (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
+  for (const url of [`${base}/matches/${encodeURIComponent(matchId)}/spec`, `${base}/spec`]) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const spec = (await res.json()) as GameSpec;
+      if (spec && typeof spec === "object" && Array.isArray(spec.actions?.enum)) return spec;
+    } catch { /* next rung */ }
+  }
+  return null;
+}
+
+/** The action enum for the play tool at a given tier: derived from the manifest
+ *  when present (easy = manifest minus the raw run/kick geometry actions; advanced
+ *  = just those), else the static fallback. New server actions surface for free. */
+export function playActionTypes(spec: GameSpec | null, mode: "easy" | "advanced" | "both"): string[] {
+  if (!spec) return mode === "easy" ? EASY_ACTIONS : mode === "advanced" ? ADVANCED_ACTIONS : [...new Set([...EASY_ACTIONS, ...ADVANCED_ACTIONS])];
+  const all = spec.actions.enum.filter((a) => typeof a === "string");
+  const advanced = all.filter((a) => a === "run" || a === "kick" || a === "stop");
+  const easy = all.filter((a) => a !== "run" && a !== "kick" && a !== "idle");
+  if (!easy.includes("stop")) easy.push("stop");
+  return mode === "easy" ? easy : mode === "advanced" ? advanced : [...new Set([...easy, ...advanced])];
 }
 
 /** Stable cross-process cache key for this agent (one gateway = one sessionKey).
@@ -284,7 +347,7 @@ function lobbyTools(cfg: PluginCfg): AnyAgentTool[] {
       async execute(_id, params) {
         const { id } = await client.createRoom({ teamSize: params.teamSize, ...(params.maxGoals ? { maxGoals: params.maxGoals } : {}) });
         const seat = await joinVia(id, params.team);
-        return ok({ matchId: id, ...seat, note: "waiting for an opponent — the match starts automatically when one joins" });
+        return ok({ matchId: id, ...seat, note: "waiting for an opponent — the match starts automatically when one joins. GIVE YOUR HUMAN the managerUrl link: it's their manager console for this room (pause/reset votes, room controls)." });
       },
     },
     {
@@ -305,7 +368,7 @@ function lobbyTools(cfg: PluginCfg): AnyAgentTool[] {
           id = q.matchId;
         }
         const seat = await joinVia(id, params.team);
-        return ok({ matchId: id, ...seat, note: seat.started ? "opponent present — playing now!" : "seated — match starts when an opponent joins" });
+        return ok({ matchId: id, ...seat, note: (seat.started ? "opponent present — playing now!" : "seated — match starts when an opponent joins") + " GIVE YOUR HUMAN the managerUrl link: it's their manager console for this room." });
       },
     },
     {
@@ -525,11 +588,11 @@ function moveToBody(m: Record<string, unknown>): Record<string, unknown> {
 
 // One tool call that moves EVERY player you control — a move per player. This
 // is the preferred way to play a multi-player side: one call instead of N.
-function playTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both"): AnyAgentTool {
+function playTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both", spec: GameSpec | null = null): AnyAgentTool {
   const client = pitchClient(cfg);
-  const easy = ["chase", "shoot", "dribble", "pass", "defend", "press", "cover", "stop"];
-  const adv = ["run", "kick", "stop"];
-  const acts = mode === "easy" ? easy : mode === "advanced" ? adv : [...new Set([...easy, ...adv])];
+  // Phase 4: the action enum is GENERATED from the /spec manifest when reachable
+  // (a new server action surfaces here with no plugin edit), else static fallback.
+  const acts = playActionTypes(spec, mode);
   const move = Type.Object({
     player: Type.String({ description: "one of your players (id, e.g. home-9)" }),
     action: Type.Union(acts.map((a) => Type.Literal(a)), { description: "what that player should do" }),
@@ -538,14 +601,17 @@ function playTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both"): AnyAgentT
     distance: Type.Optional(Type.Number()), power: Type.Optional(Type.Number()),
     say: Type.Optional(Type.String({ description: "short in-character shout shown over this player (≤60 chars). FREE for everyone — banter makes the match fun to watch" })),
   });
+  const specHints = spec?.actions.descriptions
+    ? acts.filter((a) => spec.actions.descriptions![a]).map((a) => `${a}: ${spec.actions.descriptions![a]}`).join("; ")
+    : "";
   return {
     name: "soccer_play",
     label: "Move all players",
     description:
       "Set actions for ALL the players you control in ONE call: pass moves=[{player, action, ...}] with one entry per player. Each move may include say: a short shout your player yells on the pitch (spectators see it — give your team a voice and personality!). Prefer this over calling a per-player tool N times. " +
-      (mode === "advanced"
-        ? "action ∈ run|kick|stop (run/kick need dirX,dirY + distance/power)."
-        : "action ∈ chase|shoot|dribble|pass|stop (dribble takes side)."),
+      `action ∈ ${acts.join("|")}.` +
+      (acts.includes("run") || acts.includes("kick") ? " (run/kick need dirX,dirY + distance/power; dribble takes side)." : " (dribble takes side).") +
+      (specHints ? " Actions — " + specHints : ""),
     parameters: Type.Object({ moves: Type.Array(move, { description: "one move per player you control" }) }),
     async execute(_id, params) {
       const applied: unknown[] = [];
@@ -565,11 +631,11 @@ function playTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both"): AnyAgentT
   } as AnyAgentTool;
 }
 
-export function createSoccerTools(api: OpenClawPluginApi): AnyAgentTool[] {
+export function createSoccerTools(api: OpenClawPluginApi, spec: GameSpec | null = null): AnyAgentTool[] {
   const cfg = (api.pluginConfig ?? {}) as PluginCfg;
   const mode = cfg.mode ?? "easy";
 
-  const tools: AnyAgentTool[] = [...lobbyTools(cfg), observeTool(cfg, mode), playTool(cfg, mode)];
+  const tools: AnyAgentTool[] = [...lobbyTools(cfg), observeTool(cfg, mode), playTool(cfg, mode, spec)];
   if (mode === "easy" || mode === "both") tools.push(...easyTools(cfg));
   if (mode === "advanced" || mode === "both") tools.push(...advancedTools(cfg));
 

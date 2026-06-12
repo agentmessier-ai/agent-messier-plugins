@@ -38,7 +38,7 @@ export default function register(api: OpenClawPluginApi) {
         let move = 0;
         // Fire-and-forget: the watcher runs until aborted or the gateway stops.
         void startObserveWatcher(
-          { serverUrl: cfg.serverUrl, matchId, agentId, mode: cfg.mode },
+          { serverUrl: cfg.serverUrl, matchId, agentId, mode: cfg.mode, strategyFile: cfg.strategyFile },
           async (msg) => {
             if (!sessionKey) {
               ctx.logger.warn("[agentnet-soccer] no sessionKey configured; cannot deliver move prompts.");

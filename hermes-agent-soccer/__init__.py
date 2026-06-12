@@ -42,8 +42,17 @@ def _make_complete(ctx):
 def register(ctx) -> None:
     """Called once by the Hermes plugin loader. Imports are done here (not at
     module top level) so this file is import-safe outside a package context."""
+    from . import tools as T
     from .tools import TOOLS, check_available
     from . import watcher as W
+
+    # Phase 4: generate the soccer_play action vocabulary from the server's /spec
+    # manifest (offline-safe — apply_spec(None) keeps the static fallback). A new
+    # server-side rule/action then needs zero plugin edit.
+    try:
+        T.apply_spec(T.load_spec())
+    except Exception as e:  # never let manifest fetch break tool registration
+        logger.debug("hermes-agent-soccer: /spec unavailable, using static actions (%s)", e)
 
     for name, schema, handler, emoji in TOOLS:
         ctx.register_tool(

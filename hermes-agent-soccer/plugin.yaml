@@ -1,5 +1,5 @@
 name: hermes-agent-soccer
-version: 1.1.0
+version: 1.2.0
 description: "Play Agent Messier soccer from hermes-agent — field a whole AI football team. 5 tools (matches, join, observe, play, autoplay) over the AgentNet pitch HTTP API. The Hermes counterpart to the OpenClaw agentnet-soccer plugin."
 author: "AgentNet"
 kind: standalone
@@ -25,3 +25,6 @@ requires_env:
   - name: AGENTNET_SOCCER_CADENCE_MS
     optional: true
     description: "Min milliseconds between autoplay decisions (default 3000)."
+  - name: AGENTNET_SOCCER_STRATEGY_FILE
+    optional: true
+    description: "Path to a human-editable strategy.md injected into each decision (default ~/.hermes/agent-soccer/strategy.md). Capped at ~1k chars; mtime-cached so edits apply mid-match."

@@ -10,7 +10,9 @@
  *
  * SSE loop + exponential-backoff reconnect, signal-abortable.
  */
+import { statSync, readFileSync } from "node:fs";
 import { describeTeam, type TeamView } from "./format.js";
+import { fetchMatchSpec, type GameSpec, type PluginCfg } from "./tools.js";
 import { session } from "./state.js";
 
 export type WatcherCfg = {
@@ -20,7 +22,34 @@ export type WatcherCfg = {
   agentId: string;
   /** Tool tier — tailors the move prompt to the agent's tools. Default "easy". */
   mode?: "easy" | "advanced" | "both";
+  /** Human-editable strategy.md injected into the move prompt (Phase 5). */
+  strategyFile?: string;
 };
+
+// ── human-editable strategy (Phase 5) ────────────────────────────────────────
+// A markdown file the manager edits; injected into the move prompt. mtime-cached
+// (no re-read per tick), refreshed on edit, capped so it can't blow the prompt.
+const STRATEGY_CAP = 1000;
+const _strategyCache = new Map<string, { mtimeMs: number; text: string }>();
+
+/** Test seam: drop the mtime cache. */
+export function _clearStrategyCache(): void { _strategyCache.clear(); }
+
+/** The manager's standing instructions, mtime-cached + capped. '' when the file
+ *  is unset/absent/unreadable, so no block is injected. */
+export function strategyText(file?: string): string {
+  if (!file) return "";
+  let mtimeMs: number;
+  try { mtimeMs = statSync(file).mtimeMs; }
+  catch { _strategyCache.delete(file); return ""; }
+  const cached = _strategyCache.get(file);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.text;
+  let text: string;
+  try { text = readFileSync(file, "utf8").trim().slice(0, STRATEGY_CAP); }
+  catch { return ""; }
+  _strategyCache.set(file, { mtimeMs, text });
+  return text;
+}
 
 export type WatcherLogger = {
   info: (msg: string) => void;
@@ -36,8 +65,43 @@ export type WatcherOptions = {
   onReclaim?: () => Promise<void>;
 };
 
-function prompt(v: TeamView, mode: "easy" | "advanced" | "both"): string {
+/** One SSE block → {event?, data?}. Named events carry the per-match spec
+ *  handshake; plain data blocks are observation frames. Pure, unit-tested. */
+export function parseSseBlock(block: string): { event?: string; data?: string } {
+  let event: string | undefined;
+  let data: string | undefined;
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event: ")) event = line.slice(7).trim();
+    else if (line.startsWith("data: ")) {
+      const payload = line.slice(6).trim();
+      if (payload) data = payload;
+    }
+  }
+  return event !== undefined ? { event, ...(data !== undefined ? { data } : {}) } : (data !== undefined ? { data } : {});
+}
+
+export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advanced" | "both", strategyFile?: string, spec?: GameSpec | null): string {
+  const standing = strategyText(strategyFile);
+  const stratBlock = standing ? `## Your manager's standing instructions\n${standing}\n\n` : "";
+  const ins = spec?.instructions;
+  if (ins && ins.system && ins.play && v.summary) {
+    // Generic GSP path: the server authored the instructions AND rendered the
+    // situation — the plugin only concatenates. Tool-calling host, so the
+    // direct-JSON `output` contract is replaced by a generic tool-act line
+    // (host concern, not game knowledge).
+    return (
+      `${ins.system}\n\n` +
+      stratBlock +
+      `${v.summary}\n\n` +
+      `${ins.play}\n\n` +
+      `Decide and act now: make ONE call to your play tool with a move for every player you control. ` +
+      `Each is a standing order until you change it.`
+    );
+  }
+  // Fallback (pre-envelope server or handshake not yet arrived): the legacy
+  // plugin-side rendering.
   return (
+    stratBlock +
     `${describeTeam(v, mode)}\n\n` +
     `Decide and act now: make ONE soccer_play call with a move for every player you control. ` +
     `Each is a standing order until you change it.`
@@ -58,6 +122,21 @@ export async function startObserveWatcher(
   let deliveredSeq = -1;
   let busy = false;
 
+  // The match's spec snapshot (instructions frozen per game). Normally arrives
+  // as the SSE `event: spec` handshake; the guard below lazily fetches it when
+  // a frame shows up first (handshake lost / pre-envelope server) — at most one
+  // in-flight attempt, re-tried on later frames until it lands. A null spec
+  // only degrades the prompt to the legacy rendering; it never blocks play.
+  let spec: GameSpec | null = null;
+  let specFetching = false;
+  function ensureSpec() {
+    if (spec !== null || specFetching) return;
+    specFetching = true;
+    fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId)
+      .then((s) => { if (s) { spec = s; logger?.info(`[agentnet-soccer] spec recovered via API (rulesVersion ${s.rulesVersion})`); } })
+      .finally(() => { specFetching = false; });
+  }
+
   function maybeDeliver() {
     if (busy || signal?.aborted || latest === null || latestSeq === deliveredSeq) return;
     // Match over → stop prompting. No message to the gateway = no LLM call.
@@ -65,7 +144,7 @@ export async function startObserveWatcher(
     busy = true;
     const seq = latestSeq;
     const obs = latest;
-    Promise.resolve(deliver(prompt(obs, cfg.mode ?? "easy")))
+    Promise.resolve(deliver(prompt(obs, cfg.mode ?? "easy", cfg.strategyFile, spec)))
       .catch((e) => logger?.error(`[agentnet-soccer] deliver failed: ${String(e)}`))
       .finally(() => { deliveredSeq = seq; busy = false; maybeDeliver(); });
   }
@@ -98,20 +177,26 @@ export async function startObserveWatcher(
         buffer = blocks.pop() ?? "";
 
         for (const block of blocks) {
-          for (const line of block.split("\n")) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice(6).trim();
-            if (!payload) continue;
-            let v: TeamView;
-            try { v = JSON.parse(payload) as TeamView; } catch { continue; }
-            if (!v || !Array.isArray(v.mine)) continue; // skip non-team frames
-            // The team stream is authoritative for which players we control, so
-            // a live ratio change on the server is followed without reconnecting.
-            session.players = v.mine.map((p) => p.id);
-            latest = v;
-            latestSeq++;
-            maybeDeliver();
+          const { event, data } = parseSseBlock(block);
+          if (!data) continue;
+          if (event === "spec") {
+            // The per-game handshake: this match's frozen instructions.
+            try {
+              const s = JSON.parse(data) as GameSpec;
+              if (s && Array.isArray(s.actions?.enum)) spec = s;
+            } catch { /* malformed handshake → the ensureSpec guard recovers */ }
+            continue;
           }
+          let v: TeamView;
+          try { v = JSON.parse(data) as TeamView; } catch { continue; }
+          if (!v || !Array.isArray(v.mine)) continue; // skip non-team frames
+          ensureSpec(); // protection: frame before handshake → fetch via API
+          // The team stream is authoritative for which players we control, so
+          // a live ratio change on the server is followed without reconnecting.
+          session.players = v.mine.map((p) => p.id);
+          latest = v;
+          latestSeq++;
+          maybeDeliver();
         }
       }
     } catch {

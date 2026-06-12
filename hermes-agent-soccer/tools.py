@@ -172,24 +172,81 @@ def _as_xy(raw: Any) -> Dict[str, float] | None:
 
 
 # ── soccer_play ──────────────────────────────────────────────────────────────
+# STATIC FALLBACK action vocabulary — used when /spec is unreachable (offline-safe).
+# When /spec IS reachable the connector calls apply_spec() and the play tool's
+# action enum is GENERATED from the published manifest, so a new server-side rule
+# (a new action) needs zero plugin edit (platform-architecture.md §2, Phase 4).
 _ACTION_TYPES = ["run", "kick", "chase", "shoot", "dribble", "pass", "defend", "press", "cover", "idle", "stop"]
 
-SOCCER_PLAY_SCHEMA = {
-    "name": "soccer_play",
-    "description": "Order one of your players to do something — a standing action that holds until you change it. Optionally include a short in-character shout ('say') that pops up as a speech bubble (shouts are free). Call once per player you want to move; observe first.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "player": dict(_STR, description="which of your players (id, e.g. 'home-9'). Omit if you control exactly one."),
-            "type": {"type": "string", "enum": _ACTION_TYPES, "description": "the action"},
-            "dir": {"type": "array", "items": {"type": "number"}, "description": "[x,y] direction in your attacking frame (+x = toward opponent goal). REQUIRED for run/kick."},
-            "distance": {"type": "number", "description": "run only: metres to run toward dir, then stop (default 20)"},
-            "power": {"type": "number", "description": "optional 0–1 effort for kick/shoot/pass (default 0.7 for kick)"},
-            "say": dict(_STR, description="optional trash-talk / call shown on the pitch (max ~34 chars)"),
+
+def load_spec() -> Optional[Dict[str, Any]]:
+    """Fetch GET /spec (the game manifest). Returns None when unreachable — the
+    caller falls back to the static vocabulary so the plugin works offline."""
+    try:
+        spec = C.request("GET", "/spec")
+    except C.PitchError:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    actions = spec.get("actions")
+    if not isinstance(actions, dict) or not isinstance(actions.get("enum"), list):
+        return None
+    return spec
+
+
+def _play_action_types(spec: Optional[Dict[str, Any]]) -> List[str]:
+    """The play action enum: from the manifest when present, else the static list."""
+    if spec:
+        enum = [str(a) for a in spec.get("actions", {}).get("enum", []) if isinstance(a, str)]
+        if enum:
+            return enum
+    return list(_ACTION_TYPES)
+
+
+def build_play_schema(spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build the soccer_play tool schema. The action enum is sourced from the
+    /spec manifest (`spec.actions.enum`) when given, else the static fallback;
+    per-action descriptions from the manifest enrich the tool description."""
+    action_types = _play_action_types(spec)
+    desc = "Order one of your players to do something — a standing action that holds until you change it. Optionally include a short in-character shout ('say') that pops up as a speech bubble (shouts are free). Call once per player you want to move; observe first."
+    hints = (spec or {}).get("actions", {}).get("descriptions") if spec else None
+    if isinstance(hints, dict) and hints:
+        lines = [f"{a}: {hints[a]}" for a in action_types if a in hints]
+        if lines:
+            desc += " Actions — " + "; ".join(lines)
+    return {
+        "name": "soccer_play",
+        "description": desc,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "player": dict(_STR, description="which of your players (id, e.g. 'home-9'). Omit if you control exactly one."),
+                "type": {"type": "string", "enum": action_types, "description": "the action"},
+                "dir": {"type": "array", "items": {"type": "number"}, "description": "[x,y] direction in your attacking frame (+x = toward opponent goal). REQUIRED for run/kick."},
+                "distance": {"type": "number", "description": "run only: metres to run toward dir, then stop (default 20)"},
+                "power": {"type": "number", "description": "optional 0–1 effort for kick/shoot/pass (default 0.7 for kick)"},
+                "say": dict(_STR, description="optional trash-talk / call shown on the pitch (max ~34 chars)"),
+            },
+            "required": ["type"],
         },
-        "required": ["type"],
-    },
-}
+    }
+
+
+# The live schema the loader registers. Mutated in place by apply_spec() at
+# connector time so the registered tool reflects the server's vocabulary.
+SOCCER_PLAY_SCHEMA = build_play_schema(None)
+
+
+def apply_spec(spec: Optional[Dict[str, Any]]) -> None:
+    """Regenerate the live soccer_play schema from a /spec manifest (or revert to
+    the static fallback when spec is None). Called once at connector register."""
+    SOCCER_PLAY_SCHEMA.clear()
+    SOCCER_PLAY_SCHEMA.update(build_play_schema(spec))
+
+
+def _play_action_enum() -> List[str]:
+    """The accepted action types for the live tool (generated or static)."""
+    return list(SOCCER_PLAY_SCHEMA.get("parameters", {}).get("properties", {}).get("type", {}).get("enum", _ACTION_TYPES))
 
 
 def soccer_play(args: Dict[str, Any], **_: Any) -> str:
@@ -206,8 +263,9 @@ def soccer_play(args: Dict[str, Any], **_: Any) -> str:
     if player not in players:
         return _err(f"'{player}' is not your player — you control {players}")
     action_type = str(args.get("type") or "").strip()
-    if action_type not in _ACTION_TYPES:
-        return _err(f"type must be one of {_ACTION_TYPES}")
+    allowed = _play_action_enum()
+    if action_type not in allowed:
+        return _err(f"type must be one of {allowed}")
 
     body: Dict[str, Any] = {"agentId": st["agentId"], "type": action_type}
     # The pitch wire format is dir:{x,y}. Our schema asks the model for [x,y],
