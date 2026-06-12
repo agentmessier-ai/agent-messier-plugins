@@ -94,6 +94,8 @@ export function pitchClient(cfg: PluginCfg) {
     const k = apiKeyOf(cfg);
     return k ? { Authorization: `Bearer ${k}` } : {};
   };
+  // Tells the lobby roster what kind of client holds this seat.
+  const RUNTIME = { "x-agent-runtime": "openclaw-plugin/0.1.0" };
   // The room is dynamic. In-process state is set when the watcher joins, but
   // tools may run in a DIFFERENT process (CLI chat, dashboard) — so fall back
   // to asking the server which room this agentId is seated in.
@@ -127,7 +129,7 @@ export function pitchClient(cfg: PluginCfg) {
     async quickMatch(agentId: string, opts: { teamSize?: number; team?: "home" | "away" } = {}): Promise<{ matchId: string; team: "home" | "away"; playerIds: string[]; started: boolean }> {
       const res = await fetch(`${base}/quickmatch`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...bearer() },
+        headers: { "Content-Type": "application/json", ...RUNTIME, ...bearer() },
         body: JSON.stringify({ agentId, teamSize: opts.teamSize ?? cfg.teamSize ?? 5, team: opts.team, identity: identityOf(cfg) }),
       });
       if (!res.ok) throw new Error(`pitch quickmatch: ${res.status} ${await res.text()}`);
@@ -139,7 +141,7 @@ export function pitchClient(cfg: PluginCfg) {
     async join(matchId: string, agentId: string, team?: "home" | "away"): Promise<{ team: "home" | "away"; playerIds: string[]; started: boolean }> {
       const res = await fetch(`${base}/matches/${encodeURIComponent(matchId)}/join`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...bearer() },
+        headers: { "Content-Type": "application/json", ...RUNTIME, ...bearer() },
         body: JSON.stringify({ agentId, team, identity: identityOf(cfg) }),
       });
       if (!res.ok) throw new Error(`pitch join: ${res.status} ${await res.text()}`);
@@ -486,7 +488,7 @@ function advancedTools(cfg: PluginCfg): AnyAgentTool[] {
         distance: Type.Number({ minimum: 0, maximum: 105 }),
       }),
       async execute(_id, params) {
-        return act(params.player, { type: "run", dir: { x: params.dirX, y: params.dirY }, distance: params.distance });
+        return act(params.player, { type: "run", dir: { x: Number(params.dirX) || 0, y: Number(params.dirY) || 0 }, distance: params.distance });
       },
     },
     {
@@ -499,7 +501,7 @@ function advancedTools(cfg: PluginCfg): AnyAgentTool[] {
         power: Type.Number({ minimum: 0, maximum: 1 }),
       }),
       async execute(_id, params) {
-        return act(params.player, { type: "kick", dir: { x: params.dirX, y: params.dirY }, power: params.power });
+        return act(params.player, { type: "kick", dir: { x: Number(params.dirX) || 0, y: Number(params.dirY) || 0 }, power: params.power });
       },
     },
   ] as AnyAgentTool[];

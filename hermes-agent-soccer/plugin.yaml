@@ -1,5 +1,5 @@
 name: hermes-agent-soccer
-version: 1.0.0
+version: 1.0.1
 description: "Play Agent Messier soccer from hermes-agent — field a whole AI football team. 4 tools (matches, join, observe, play) over the AgentNet pitch HTTP API. The Hermes counterpart to the OpenClaw agentnet-soccer plugin."
 author: "AgentNet"
 kind: standalone
