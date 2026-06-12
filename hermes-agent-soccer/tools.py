@@ -9,6 +9,7 @@ no host-internal imports, so the plugin is self-contained and publishable.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 from . import client as C
@@ -148,6 +149,25 @@ def soccer_observe(args: Dict[str, Any], **_: Any) -> str:
     })
 
 
+
+def _as_xy(raw: Any) -> Dict[str, float] | None:
+    """Coerce a direction the model may send ([x,y] list or {x,y} dict) to the
+    pitch's {x,y} wire shape with finite floats; anything else -> None."""
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        x, y = raw
+    elif isinstance(raw, dict) and "x" in raw and "y" in raw:
+        x, y = raw["x"], raw["y"]
+    else:
+        return None
+    try:
+        fx, fy = float(x), float(y)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(fx) and math.isfinite(fy)):
+        return None
+    return {"x": fx, "y": fy}
+
+
 # ── soccer_play ──────────────────────────────────────────────────────────────
 _ACTION_TYPES = ["run", "kick", "chase", "shoot", "dribble", "pass", "defend", "press", "cover", "idle", "stop"]
 
@@ -159,8 +179,9 @@ SOCCER_PLAY_SCHEMA = {
         "properties": {
             "player": dict(_STR, description="which of your players (id, e.g. 'home-9'). Omit if you control exactly one."),
             "type": {"type": "string", "enum": _ACTION_TYPES, "description": "the action"},
-            "dir": {"type": "array", "items": {"type": "number"}, "description": "optional [x,y] aim/direction in pitch coords"},
-            "power": {"type": "number", "description": "optional 0–1 effort for kick/shoot/pass"},
+            "dir": {"type": "array", "items": {"type": "number"}, "description": "[x,y] direction in your attacking frame (+x = toward opponent goal). REQUIRED for run/kick."},
+            "distance": {"type": "number", "description": "run only: metres to run toward dir, then stop (default 20)"},
+            "power": {"type": "number", "description": "optional 0–1 effort for kick/shoot/pass (default 0.7 for kick)"},
             "say": dict(_STR, description="optional trash-talk / call shown on the pitch (max ~34 chars)"),
         },
         "required": ["type"],
@@ -186,10 +207,21 @@ def soccer_play(args: Dict[str, Any], **_: Any) -> str:
         return _err(f"type must be one of {_ACTION_TYPES}")
 
     body: Dict[str, Any] = {"agentId": st["agentId"], "type": action_type}
-    if isinstance(args.get("dir"), list):
-        body["dir"] = args["dir"]
-    if isinstance(args.get("power"), (int, float)):
+    # The pitch wire format is dir:{x,y}. Our schema asks the model for [x,y],
+    # so convert here — shipping the raw array made dir.x undefined server-side
+    # and NaN-corrupted player positions.
+    direction = _as_xy(args.get("dir"))
+    if direction is not None:
+        body["dir"] = direction
+    elif action_type in ("run", "kick"):
+        return _err(f"'{action_type}' needs dir: [x,y] (your attacking frame, +x = toward opponent goal)")
+    if action_type == "run":
+        d = args.get("distance")
+        body["distance"] = float(d) if isinstance(d, (int, float)) and math.isfinite(d) else 20.0
+    if isinstance(args.get("power"), (int, float)) and math.isfinite(args["power"]):
         body["power"] = args["power"]
+    elif action_type == "kick":
+        body["power"] = 0.7
     if args.get("say"):
         body["say"] = str(args["say"])[:120]
     try:

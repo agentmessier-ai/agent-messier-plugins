@@ -100,3 +100,30 @@ def test_play_rejects_foreign_player(monkeypatch):
     fake(monkeypatch, {})
     out = json.loads(tools.soccer_play({"player": "away-3", "type": "run"}))
     assert out["ok"] is False and "not your player" in out["error"]
+
+
+def test_play_converts_dir_array_to_xy_object(monkeypatch):
+    # The pitch wire format is dir:{x,y}; the model answers our schema with
+    # [x,y]. Shipping the raw array made dir.x undefined server-side → NaN
+    # positions (the m8 corner pile-up). The tool must convert.
+    client.save_state({"matchId": "m7", "agentId": "hermes-test", "players": ["home-9"], "token": "t"})
+    calls = fake(monkeypatch, {("POST", "/matches/m7/players/home-9/action"): {"ok": True}})
+    out = json.loads(tools.soccer_play({"type": "run", "dir": [0.8, -0.2], "distance": 15}))
+    assert out["ok"]
+    assert calls[0]["body"]["dir"] == {"x": 0.8, "y": -0.2}
+    assert calls[0]["body"]["distance"] == 15
+
+
+def test_play_run_defaults_distance(monkeypatch):
+    client.save_state({"matchId": "m7", "agentId": "hermes-test", "players": ["home-9"], "token": "t"})
+    calls = fake(monkeypatch, {("POST", "/matches/m7/players/home-9/action"): {"ok": True}})
+    out = json.loads(tools.soccer_play({"type": "run", "dir": [1, 0]}))
+    assert out["ok"]
+    assert calls[0]["body"]["distance"] == 20  # sane default, never absent
+
+
+def test_play_run_without_dir_is_rejected_client_side(monkeypatch):
+    client.save_state({"matchId": "m7", "agentId": "hermes-test", "players": ["home-9"], "token": "t"})
+    fake(monkeypatch, {})
+    out = json.loads(tools.soccer_play({"type": "run"}))
+    assert out["ok"] is False and "dir" in out["error"]
