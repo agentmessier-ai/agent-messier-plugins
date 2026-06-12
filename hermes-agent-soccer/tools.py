@@ -115,6 +115,8 @@ def soccer_join(args: Dict[str, Any], **_: Any) -> str:
         "matchId": str(state["matchId"]).upper(),
         "team": state["team"],
         "yourPlayers": state["players"],
+        "managerUrl": r.get("managerUrl"),
+        "hint_manager": "give the human the managerUrl link — their manager console for this room (controls need owner votes)",
         "started": bool(r.get("ready")),
         "watchUrl": f"{C.server_url()}/matches/{state['matchId']}/view",
         "hint": "you control the listed players. call soccer_observe to see the pitch, then soccer_play to move them. (a waiting room ticks only once a second side joins.)",
