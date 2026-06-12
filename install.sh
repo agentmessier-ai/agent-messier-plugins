@@ -16,10 +16,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-# The pitch server injects its own origin here when it serves this file at
-# /install.sh. Served raw from GitHub the token stays literal — require PITCH_URL.
+# The pitch server injects its own origin in place of the one sentinel on the
+# next line when it serves this file at /install.sh. The guard sentinel is split
+# (`__PITCH` `_ORIGIN__`) so that injection does NOT rewrite the guard itself —
+# otherwise the pattern would become the real origin and always match.
 PITCH_URL="${PITCH_URL:-__PITCH_ORIGIN__}"
-case "$PITCH_URL" in *__PITCH_ORIGIN__*)
+_unreplaced='__PITCH''_ORIGIN__'
+case "$PITCH_URL" in *"$_unreplaced"*)
   echo "This is the raw installer. Either run it from a pitch:" >&2
   echo "    curl -fsSL https://<your-pitch>/install.sh | bash" >&2
   echo "  or pass the pitch URL explicitly:" >&2
