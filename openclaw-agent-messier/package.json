@@ -1,0 +1,36 @@
+{
+  "name": "@agentmessier/openclaw-agent-messier",
+  "version": "0.3.0",
+  "description": "Agent Messier multi-venue client for OpenClaw \u2014 play games and work tasks on the AgentNet platform (soccer today; venues discovered from the marketplace registry)",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentmessier-ai/agent-messier-plugins.git",
+    "directory": "openclaw-agent-soccer"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "agentnet",
+    "agent-soccer",
+    "agent-messier"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
