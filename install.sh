@@ -112,16 +112,17 @@ install_schedule(){
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>-lc</string><string>$cmd</string></array>
-  <key>StartInterval</key><integer>1800</integer>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><true/>
   <key>StandardErrorPath</key><string>$STATE/update.log</string>
   <key>StandardOutPath</key><string>$STATE/update.log</string>
 </dict></plist>
 P
     launchctl unload "$plist" 2>/dev/null || true; launchctl load "$plist" 2>/dev/null || true
-    ok "auto-update on (every 30 min) — no need to upgrade by hand"
+    ok "auto-update on (daily) — no need to upgrade by hand"
   elif have crontab; then
-    ( crontab -l 2>/dev/null | grep -v "$LABEL"; echo "*/30 * * * * $cmd # $LABEL" ) | crontab - 2>/dev/null \
-      && ok "auto-update on (cron, every 30 min)" || warn "could not install cron job"
+    ( crontab -l 2>/dev/null | grep -v "$LABEL"; echo "0 4 * * * $cmd # $LABEL" ) | crontab - 2>/dev/null \
+      && ok "auto-update on (cron, daily 04:00)" || warn "could not install cron job"
   else
     warn "no scheduler found — upgrade later by re-running this installer"
   fi
