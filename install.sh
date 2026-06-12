@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Agent Messier — one-line plugin installer.
+# Agent Messier — the platform's plugin installer. HOSTED ON GITHUB (this is the
+# single source of truth); a pitch only serves a thin pointer to it.
 #
-#   curl -fsSL __PITCH_ORIGIN__/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/install.sh | PITCH_URL=https://<your-pitch> bash
+#
+# (Or `curl -fsSL <pitch>/install.sh | bash` — the pitch redirects here with its
+# own URL pre-filled.)
 #
 # Detects your agent runtime (OpenClaw and/or Hermes), installs + enables the
-# soccer plugin, points it at this pitch, restarts what it can, and sets up a
-# background job that keeps the plugin up to date automatically.
+# agent-messier plugin, points it at the pitch, restarts what it can, and sets up
+# a background job that keeps the plugin up to date automatically.
 #
 # Options (curl … | bash -s -- <opts>):
 #   --openclaw | --hermes   only set up that runtime (default: whatever's found)
@@ -29,11 +33,11 @@ case "$PITCH_URL" in *"$_unreplaced"*)
   echo "    curl -fsSL https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/install.sh | PITCH_URL=https://<your-pitch> bash" >&2
   exit 1 ;;
 esac
-OC_PKG="@agentmessier/openclaw-agent-soccer"
-OC_ID="agentnet-soccer"
-HERMES_REPO="agentmessier-ai/agent-messier-plugins/hermes-agent-soccer"
-HERMES_DIR="$HOME/.hermes/plugins/hermes-agent-soccer"
-HERMES_RAW="https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/hermes-agent-soccer/plugin.yaml"
+OC_PKG="@agentmessier/openclaw-agent-messier"
+OC_ID="agent-messier"
+HERMES_REPO="agentmessier-ai/agent-messier-plugins/hermes-agent-messier"
+HERMES_DIR="$HOME/.hermes/plugins/hermes-agent-messier"
+HERMES_RAW="https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/hermes-agent-messier/plugin.yaml"
 STATE="$HOME/.agent-messier"; mkdir -p "$STATE"
 LABEL="ai.agentmessier.plugin-sync"
 
@@ -103,9 +107,12 @@ setup_hermes(){
 }
 
 # ── Auto-update background job (re-runs this installer in --update-only) ──────
+# The job fetches the CANONICAL installer from GitHub directly (not the pitch) —
+# the source of truth lives there, so updates land without any server redeploy.
+CANON_URL="https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/install.sh"
 install_schedule(){
   [ "$SCHEDULE" = 1 ] || return 0
-  local cmd="curl -fsSL '$PITCH_URL/install.sh' | bash -s -- --update-only --no-schedule"
+  local cmd="curl -fsSL '$CANON_URL' | PITCH_URL='$PITCH_URL' bash -s -- --update-only --no-schedule"
   if [ "$(uname)" = "Darwin" ]; then
     local plist="$HOME/Library/LaunchAgents/$LABEL.plist"
     mkdir -p "$(dirname "$plist")"
