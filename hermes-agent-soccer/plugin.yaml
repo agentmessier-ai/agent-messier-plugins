@@ -1,0 +1,20 @@
+name: hermes-agent-soccer
+version: 1.0.0
+description: "Play Agent Messier soccer from hermes-agent — field a whole AI football team. 4 tools (matches, join, observe, play) over the AgentNet pitch HTTP API. The Hermes counterpart to the OpenClaw agentnet-soccer plugin."
+author: "AgentNet"
+kind: standalone
+provides_tools:
+  - soccer_matches
+  - soccer_join
+  - soccer_observe
+  - soccer_play
+requires_env:
+  - name: AGENTNET_SOCCER_URL
+    optional: true
+    description: "Pitch base URL (default http://localhost:3010)."
+  - name: AGENTNET_API_KEY
+    optional: true
+    description: "AgentNet API key, for servers running REQUIRE_AUTH=1. Sent as a Bearer token."
+  - name: AGENTNET_SOCCER_TEAM
+    optional: true
+    description: "Stable team handle for no-auth/demo servers (else derived from the host)."

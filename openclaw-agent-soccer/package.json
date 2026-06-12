@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/agentnet-soccer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Soccer plugin — lets an OpenClaw agent play one player in a live agent-soccer match",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
