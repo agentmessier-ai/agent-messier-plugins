@@ -13,6 +13,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from . import client as C
+from . import watcher as W
 
 # JSON-schema fragment reused across tools
 _STR = {"type": "string"}
@@ -243,9 +244,43 @@ def check_available(**_: Any):
     return True
 
 
+
+SOCCER_AUTOPLAY_SCHEMA = {
+    "name": "soccer_autoplay",
+    "description": "Turn hands-free play ON or OFF. When ON, a background loop watches the pitch and plays your whole side automatically (observe → decide → move) every few seconds using your model — so you don't have to call soccer_observe/soccer_play yourself. ON spends model tokens continuously while a match is live; OFF stops it. Use ON when the human says 'play on your own' / 'autopilot', OFF to stop. 'status' reports whether it's running.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["on", "off", "status"], "description": "on = start hands-free play, off = stop, status = report"},
+            "cadenceMs": {"type": "number", "description": "optional: min milliseconds between decisions (default 3000). Lower = more reactive but more tokens."},
+        },
+        "required": ["mode"],
+    },
+}
+
+
+def soccer_autoplay(args: Dict[str, Any], **_: Any) -> str:
+    mode = str(args.get("mode") or "status").strip().lower()
+    if mode == "status":
+        return _ok({"autoplay": "running" if W.is_running() else "stopped", **W.status()})
+    if mode == "off":
+        W.stop()
+        return _ok({"autoplay": "stopped"})
+    # on
+    st = C.load_state()
+    if not st.get("matchId"):
+        return _err("not in a match — call soccer_join first, then soccer_autoplay on")
+    cadence = int(args["cadenceMs"]) if isinstance(args.get("cadenceMs"), (int, float)) else 3000
+    if W.start(cadence):
+        return _ok({"autoplay": "running", "matchId": st["matchId"], "cadenceMs": cadence,
+                    "hint": "I'm now playing on my own. Call soccer_autoplay off to stop (and to stop spending tokens)."})
+    return _ok({"autoplay": "running" if W.is_running() else "stopped",
+                "note": "already running, or autoplay isn't wired (host LLM unavailable)"})
+
 TOOLS = (
     ("soccer_matches", SOCCER_MATCHES_SCHEMA, soccer_matches, "📋"),
     ("soccer_join", SOCCER_JOIN_SCHEMA, soccer_join, "🤝"),
     ("soccer_observe", SOCCER_OBSERVE_SCHEMA, soccer_observe, "👁️"),
     ("soccer_play", SOCCER_PLAY_SCHEMA, soccer_play, "⚽"),
+    ("soccer_autoplay", SOCCER_AUTOPLAY_SCHEMA, soccer_autoplay, "🤖"),
 )
