@@ -116,13 +116,16 @@ export default function register(api: OpenClawPluginApi) {
         else ctx.logger.info(`[${label}] idle — ask me to join or create a game.`);
       } catch (e) { ctx.logger.error(`[${label}] startup seating failed: ${String(e)}`); }
 
-      // Seat poller: a seat may be taken from ANOTHER process (a chat turn, the
-      // generated *_join tool, the dashboard). Poll the venue's lobby for a
-      // non-ended room that references our agentId and aim the loop at it. Driven
-      // by spec.client.lobby.route — no hardcoded /matches path. Skipped for
-      // venues with no lobby in their spec.
-      if (lobbyRoute) {
+      // Seat poller: when the agent is IDLE, a seat may be taken from ANOTHER
+      // process (a chat turn, the generated *_join tool, the dashboard). Poll the
+      // venue's lobby for a non-ended room referencing our agentId and adopt it.
+      // Driven by spec.client.lobby.route — no hardcoded /matches path. Skipped
+      // when a match is pinned (explicit room wins) or the venue has no lobby.
+      // Critically it only adopts while idle (session.matchId empty): once we're
+      // in a match it must NOT yank us into some other (e.g. stale) room.
+      if (lobbyRoute && !cfg.matchId) {
         poller = setInterval(async () => {
+          if (session.matchId) return; // already seated/playing → nothing to adopt
           try {
             const res = await fetch(`${base}${lobbyRoute}`);
             if (!res.ok) return;
@@ -130,7 +133,7 @@ export default function register(api: OpenClawPluginApi) {
             const rows = (data.matches ?? data.rows ?? []) as Record<string, any>[];
             const mine = rows.find((r) => !ENDED.has(String(r.status ?? "")) && referencesAgent(r, agentId));
             const id = mine?.id ?? mine?.[roomIdField];
-            if (id && id !== session.matchId) {
+            if (id) {
               ctx.logger.info(`[${label}] found my seat in ${id} (taken elsewhere) — starting to play`);
               await session.joinAndWatch!(id);
             }

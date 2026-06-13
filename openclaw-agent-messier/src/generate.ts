@@ -85,7 +85,10 @@ export async function joinVenue(
   const d = r.data;
   if (typeof d.did === "string") rememberDid(cfg, d.did);     // cross-process identity
   if (typeof d.token === "string") rememberToken(cfg, d.token); // cross-process seat token
-  const seat: Seat = { id: d[sm.id], token: d[sm.token], controls: d[sm.controls] ?? [], agentId: d.did ?? meId, started: d.started, managerUrl: d.managerUrl };
+  // A rejoin via seatRoute already KNOWS the room (it's in the URL), so the
+  // server's response omits it — fall back to the matchId we joined with, or
+  // seat.id ends up undefined and the observe loop hits /…//… → 404 → reclaim.
+  const seat: Seat = { id: d[sm.id] ?? opts.matchId, token: d[sm.token], controls: d[sm.controls] ?? [], agentId: d.did ?? meId, started: d.started, managerUrl: d.managerUrl };
   seats.set(venue.id, seat);
   // soccer back-compat: the service watcher + seat-poller read `session`.
   session.matchId = seat.id ?? null; session.players = seat.controls ?? []; session.token = seat.token ?? null; session.did = seat.agentId ?? null;

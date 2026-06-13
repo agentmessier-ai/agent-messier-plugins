@@ -86,6 +86,17 @@ describe("joinVenue — the one spec-driven seating path (tool + service share i
     expect(url).toBe("http://golf.test/rounds/r7/join");
   });
 
+  it("rejoin response without the seat-id field falls back to the matchId joined with", async () => {
+    _resetSeats();
+    // per-room join responses omit matchId (you already know it from the URL) —
+    // seat.id must still resolve, or the observe loop 404s and reclaim-loops.
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      ({ ok: true, json: async () => ({ token: "t", playerIds: ["p1", "p2", "p3"], started: true }) }) as any));
+    const seat = await joinVenue(GOLF_VENUE, GOLF_SPEC, cfg(), { matchId: "r7" });
+    expect(seat.id).toBe("r7");
+    expect(session.matchId).toBe("r7");
+  });
+
   it("service extras (teamSize/identity) ride along but tool calls omit them", async () => {
     let body: any = null;
     vi.stubGlobal("fetch", vi.fn(async (_u: any, init?: any) => {
