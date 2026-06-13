@@ -138,28 +138,39 @@ def _observe_handler(venue: Dict[str, Any], spec: Dict[str, Any]) -> Callable[..
     return handler
 
 
-def _act_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, Any]) -> Callable[..., str]:
+def _act_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, Any], batch: bool) -> Callable[..., str]:
     enum = [str(a) for a in spec.get("actions", {}).get("enum", [])]
     props = step.get("params", {})
     route = spec["routes"]["act"]
 
-    def handler(args: Dict[str, Any], **_: Any) -> str:
-        action = str(args.get("type") or "").strip()
+    def post_one(m: Dict[str, Any], seat: Dict[str, Any], did: str) -> Dict[str, Any]:
+        action = str(m.get("type") or "").strip()
         if action not in enum:
-            return T._err(f"type must be one of {enum}")
+            return {"player": m.get("player"), "error": f"type must be one of {enum}"}
+        player = m.get("player") or (seat.get("controls") or [None])[0]
+        path = _sub(route, matchId=seat.get("id", ""), did=did, playerId=player or "")
+        # `player` is the ROUTING key (it's in the URL) — never an action-body field.
+        body: Dict[str, Any] = {"agentId": did, "type": action,
+                                **{k: v for k, v in _whitelist(m, props).items() if k != "player"}}
+        try:
+            C.request("POST", path, body, base=_base(venue), caller_did=did, seat_token=seat.get("token"))
+            return {"player": player, "type": action}
+        except C.PitchError as e:
+            return {"player": player, "error": e.message}
+
+    def handler(args: Dict[str, Any], **_: Any) -> str:
         seat = _seat(venue["id"])
         did = _did(seat)
-        player = args.get("player") or (seat.get("controls") or [None])[0]
-        path = _sub(route, matchId=seat.get("id", ""), did=did, playerId=player or "")
-        # `player` is the ROUTING key (it's in the URL) — never an action-body
-        # field; drop it so the body carries only real action params.
-        body: Dict[str, Any] = {"agentId": did, "type": action,
-                                **{k: v for k, v in _whitelist(args, props).items() if k != "player"}}
-        try:
-            r = C.request("POST", path, body, base=_base(venue), caller_did=did, seat_token=seat.get("token"))
-        except C.PitchError as e:
-            return T._err(e.message, status=e.status)
-        return T._ok({"ok": True, "type": action, "result": r})
+        if batch:
+            # Games seat a WHOLE side — one call orders EVERY player you control,
+            # so a (possibly small) model never has to remember to fire N calls.
+            moves = args.get("moves") or []
+            if not isinstance(moves, list) or not moves:
+                return T._err("pass moves=[{player, type, …}] — one entry per player you control")
+            return T._ok({"ok": True, "applied": [post_one(m, seat, did) for m in moves]})
+        # Seatless venue (work market): a single action.
+        out = post_one(args, seat, did)
+        return T._err(out["error"]) if "error" in out else T._ok({"ok": True, **out})
     return handler
 
 
@@ -322,9 +333,22 @@ def generate_venue_tools(venue: Dict[str, Any], spec: Dict[str, Any]) -> List[To
     act_desc = act["summary"]
     if descs:
         act_desc += " Actions — " + "; ".join(f"{a}: {descs[a]}" for a in enum if a in descs)
-    act_props = {"type": {"type": "string", "enum": enum, "description": "the action"}, **act.get("params", {})}
-    out.append((act["tool"], _schema(act["tool"], act_desc, act_props, required=["type"]),
-                _act_handler(venue, spec, act), "⚽"))
+    # Games seat a whole side (join.seat.controls) → BATCH: one call sets a move
+    # for EVERY player you control, so the agent never under-fires N single calls.
+    # Seatless venues (work market) keep the single-action shape.
+    batch = bool(((c.get("join") or {}).get("seat") or {}).get("controls"))
+    extra = {k: v for k, v in act.get("params", {}).items() if k != "player"}
+    if batch:
+        item = {"type": "object", "required": ["player", "type"],
+                "properties": {"player": {"type": "string", "description": "your player id, e.g. home-9"},
+                               "type": {"type": "string", "enum": enum, "description": "the action"}, **extra}}
+        act_props = {"moves": {"type": "array", "description": "one entry per player you control", "items": item}}
+        act_desc += " Set actions for ALL players you control in ONE call: moves=[{player, type, …}], one per player."
+        schema = _schema(act["tool"], act_desc, act_props, required=["moves"])
+    else:
+        act_props = {"type": {"type": "string", "enum": enum, "description": "the action"}, **extra}
+        schema = _schema(act["tool"], act_desc, act_props, required=["type"])
+    out.append((act["tool"], schema, _act_handler(venue, spec, act, batch), "⚽"))
 
     if c.get("autoplay"):
         ap = c["autoplay"]

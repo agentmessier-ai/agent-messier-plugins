@@ -83,27 +83,30 @@ def test_observe_reports_match_gone(monkeypatch):
     assert out["ok"] is False and "join again" in out["error"]
 
 
-def test_act_validates_enum_defaults_player_and_sends_token(monkeypatch):
-    client.save_state({"seats": {"agent-soccer": {"id": "m7", "agentId": "hermes-test", "controls": ["home-9"], "token": "seat-xyz"}}})
-    calls = fake(monkeypatch, {("POST", "/matches/m7/players/home-9/action"): {"ok": True}})
-    out = json.loads(tool("soccer_play")({"type": "shoot", "say": "GOAL"}))
-    assert out["ok"] and out["type"] == "shoot"
-    assert calls[0]["path"] == "/matches/m7/players/home-9/action"  # {playerId} ← first controlled
-    assert calls[0]["seat_token"] == "seat-xyz"
+def test_act_batches_moves_for_all_players_and_sends_token(monkeypatch):
+    # soccer_play is BATCH for a seated game: one call, one entry per player.
+    client.save_state({"seats": {"agent-soccer": {"id": "m7", "agentId": "hermes-test", "controls": ["home-9", "home-10"], "token": "seat-xyz"}}})
+    calls = fake(monkeypatch, {("POST", "/matches/m7/players/"): {"ok": True}})
+    out = json.loads(tool("soccer_play")({"moves": [
+        {"player": "home-9", "type": "shoot", "say": "GOAL"},
+        {"player": "home-10", "type": "chase"}]}))
+    assert out["ok"] and [a["type"] for a in out["applied"]] == ["shoot", "chase"]
+    assert {c["path"] for c in calls} == {"/matches/m7/players/home-9/action", "/matches/m7/players/home-10/action"}
+    assert all(c["seat_token"] == "seat-xyz" for c in calls)
     assert calls[0]["body"]["say"] == "GOAL"
 
 
-def test_act_rejects_unpublished_action(monkeypatch):
+def test_act_rejects_unpublished_action_per_move(monkeypatch):
     client.save_state({"seats": {"agent-soccer": {"id": "m7", "agentId": "hermes-test", "controls": ["home-9"], "token": "t"}}})
     fake(monkeypatch, {})
-    out = json.loads(tool("soccer_play")({"type": "teleport"}))
-    assert out["ok"] is False and "must be one of" in out["error"]
+    out = json.loads(tool("soccer_play")({"moves": [{"player": "home-9", "type": "teleport"}]}))
+    assert out["ok"] and "must be one of" in out["applied"][0]["error"]  # bad move flagged, call doesn't crash
 
 
 def test_act_coerces_dir_array_to_xy(monkeypatch):
     client.save_state({"seats": {"agent-soccer": {"id": "m7", "agentId": "hermes-test", "controls": ["home-9"], "token": "t"}}})
     calls = fake(monkeypatch, {("POST", "/matches/m7/players/home-9/action"): {"ok": True}})
-    out = json.loads(tool("soccer_play")({"type": "run", "dir": [0.8, -0.2], "distance": 15}))
+    out = json.loads(tool("soccer_play")({"moves": [{"player": "home-9", "type": "run", "dir": [0.8, -0.2], "distance": 15}]}))
     assert out["ok"]
     assert calls[0]["body"]["dir"] == {"x": 0.8, "y": -0.2}  # the one client fixup kept
     assert calls[0]["body"]["distance"] == 15

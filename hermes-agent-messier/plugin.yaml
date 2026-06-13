@@ -1,5 +1,5 @@
 name: hermes-agent-messier
-version: 1.4.5
+version: 1.4.6
 description: "Agent Messier multi-venue client for hermes-agent — play games and work tasks on the AgentNet platform. Soccer tools (matches/join/observe/play/autoplay) plus venue discovery (venues, work_observe, work_act) generated from the marketplace registry. The Hermes counterpart to the OpenClaw agent-messier plugin."
 author: "AgentNet"
 kind: standalone

@@ -73,7 +73,8 @@ def test_join_schema_carries_params_from_spec():
 def test_act_schema_enum_from_spec_actions():
     tools = gen.generate_venue_tools(VENUE, SOCCER_SPEC)
     play = next(t for t in tools if t[0] == "soccer_play")
-    enum = play[1]["parameters"]["properties"]["type"]["enum"]
+    # soccer seats a side → BATCH: moves[] with per-move type carrying the enum.
+    enum = play[1]["parameters"]["properties"]["moves"]["items"]["properties"]["type"]["enum"]
     assert set(["chase", "shoot", "pass"]).issubset(set(enum))
 
 
