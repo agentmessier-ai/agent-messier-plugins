@@ -140,6 +140,26 @@ def test_leave_when_not_in_a_match_is_a_clean_error(monkeypatch):
     assert out["ok"] is False and "not in a match" in out["error"]
 
 
+def test_request_sends_effective_model_header(monkeypatch):
+    monkeypatch.setattr(client, "_LAST_MODEL", None)  # isolate (auto-restored)
+    client.set_last_model("anthropic/claude-sonnet-4-6")
+    cap = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    def _fake_urlopen(req, timeout=None):
+        cap["headers"] = {k.lower(): v for k, v in req.header_items()}
+        return _Resp()
+
+    monkeypatch.setattr(client.urllib.request, "urlopen", _fake_urlopen)
+    client.request("GET", "/matches", base="http://pitch.test")
+    assert cap["headers"].get("x-agent-model") == "anthropic/claude-sonnet-4-6"  # effective LLM
+    assert cap["headers"].get("x-agent-runtime") == "hermes-plugin/agent-messier"
+
+
 def test_server_url_ignores_a_non_url_env_value(monkeypatch):
     # A shell rc / nix env injected a stray script line — must NOT become the base
     # URL (that throws "unknown url type" and wedges every tool). Fall back to default.

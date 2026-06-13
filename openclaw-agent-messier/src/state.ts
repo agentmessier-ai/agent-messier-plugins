@@ -19,8 +19,12 @@ export const session: {
   did: string | null
   turn: number
   lockstep: boolean
+  /** Effective LLM (provider/model) of the most recent decision, captured from
+   *  the gateway's llm_output hook — sent as x-agent-model so the pitch records
+   *  the model that's actually playing (reflects a mid-match /model switch). */
+  lastModel: string | null
   /** Installed by the service: seat into a venue room (matchId omitted = quickmatch
    *  find-or-create) and start the observe/act loop. `params` are venue join params
    *  (e.g. teamSize/team for soccer). Returns the seat the loop is now driving. */
   joinAndWatch: ((matchId?: string, params?: Record<string, unknown>) => Promise<{ id?: string; controls?: string[]; started?: boolean }>) | null
-} = { matchId: null, players: [], token: null, did: null, turn: 0, lockstep: false, joinAndWatch: null }
+} = { matchId: null, players: [], token: null, did: null, turn: 0, lockstep: false, lastModel: null, joinAndWatch: null }

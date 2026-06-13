@@ -36,6 +36,7 @@ function did(venueId: string, cfg: PluginCfg): string {
  *  what it needs: Bearer→DID for games, x-caller-did for work, seat token for acts). */
 async function vfetch(base: string, path: string, opts: { method?: string; body?: unknown; cfg: PluginCfg; token?: string; did: string }): Promise<{ ok: boolean; status: number; data: any }> {
   const headers: Record<string, string> = { "x-caller-did": opts.did, "x-agent-runtime": "openclaw-plugin/0.2.0" };
+  if (session.lastModel) headers["x-agent-model"] = session.lastModel; // effective LLM for the pitch roster
   const key = apiKeyOf(opts.cfg); if (key) headers["Authorization"] = `Bearer ${key}`;
   if (opts.token) headers["x-agent-token"] = opts.token;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";

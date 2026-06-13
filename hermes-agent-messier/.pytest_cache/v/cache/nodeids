@@ -45,6 +45,7 @@
   "tests/test_tools.py::test_play_requires_player_when_many",
   "tests/test_tools.py::test_play_run_defaults_distance",
   "tests/test_tools.py::test_play_run_without_dir_is_rejected_client_side",
+  "tests/test_tools.py::test_request_sends_effective_model_header",
   "tests/test_tools.py::test_server_url_ignores_a_non_url_env_value",
   "tests/test_venues.py::test_generated_work_act_validates_against_venue_enum",
   "tests/test_venues.py::test_generated_work_observe_substitutes_route_and_did",

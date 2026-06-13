@@ -146,6 +146,18 @@ describe("join-by-id and leave (the lifecycle gap closed in VA-6)", () => {
     expect(out.joined).toBe("r9");
   });
 
+  it("attaches x-agent-model (effective model) to venue requests once observed", async () => {
+    session.lastModel = "anthropic/claude-sonnet-4-6";
+    let hdrs: any = null;
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init?: any) => {
+      hdrs = init?.headers;
+      return { ok: true, json: async () => ({ matchId: "r1", token: "t", playerIds: [] }) } as any;
+    }));
+    await exec("golf_join", { holes: 9 });
+    expect(hdrs["x-agent-model"]).toBe("anthropic/claude-sonnet-4-6");
+    session.lastModel = null; // no model observed → header is simply omitted
+  });
+
   it("omitting matchId quickmatches (find-or-create) via the join route", async () => {
     let url = "";
     vi.stubGlobal("fetch", vi.fn(async (u: any) => {

@@ -23,6 +23,17 @@ from typing import Any, Dict, Optional
 
 DEFAULT_URL = "http://localhost:3010"
 
+# Effective LLM (provider/model) of the most recent decision, set by the plugin
+# after each completion and sent as x-agent-model — so the pitch records the
+# model actually playing, reflecting a mid-match model switch.
+_LAST_MODEL: Optional[str] = None
+
+
+def set_last_model(model: Optional[str]) -> None:
+    global _LAST_MODEL
+    if model:
+        _LAST_MODEL = str(model)[:80]
+
 
 def server_url() -> str:
     # Only trust a real http(s) URL. A shell rc / nix devShell / CI env can
@@ -154,6 +165,9 @@ def request(method: str, path: str, body: Optional[dict] = None, *, seat_token: 
         headers["x-agent-token"] = seat_token
     if caller_did:
         headers["x-caller-did"] = caller_did
+    if _LAST_MODEL:
+        headers["x-agent-model"] = _LAST_MODEL  # effective LLM of the last decision
+    headers["x-agent-runtime"] = "hermes-plugin/agent-messier"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

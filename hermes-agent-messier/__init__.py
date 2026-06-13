@@ -36,6 +36,16 @@ def _make_complete(ctx):
     plugins.entries.hermes-agent-soccer.llm.* (fail-closed by the host)."""
     def complete(messages):
         result = ctx.llm.complete(messages, max_tokens=500, timeout=30)
+        # Capture the EFFECTIVE model that produced this decision (provider/model
+        # from the completion result) → sent as x-agent-model on the next move,
+        # so the pitch records the model actually playing (mid-match switch aware).
+        try:
+            from . import client as _C
+            prov, mdl = getattr(result, "provider", None), getattr(result, "model", None)
+            if mdl:
+                _C.set_last_model(f"{prov}/{mdl}" if prov else str(mdl))
+        except Exception:
+            pass
         return getattr(result, "text", "") or ""
     return complete
 

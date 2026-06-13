@@ -25,6 +25,14 @@ export default function register(api: OpenClawPluginApi) {
     api.registerTool(tool as AnyAgentTool);
   }
 
+  // Capture the EFFECTIVE model of each decision from the gateway's llm_output
+  // hook (the provider/model of the call that just ran). vfetch sends it as
+  // x-agent-model, so the pitch records the model actually PLAYING — reflecting
+  // a mid-match /model switch, not a static configured default.
+  api.registerHook("llm_output", ((event: { provider?: string; model?: string }) => {
+    if (event?.model) session.lastModel = event.provider ? `${event.provider}/${event.model}` : event.model;
+  }) as Parameters<typeof api.registerHook>[1]);
+
   // 2. Autoplay watcher. It drives ONE realtime venue (streams observations,
   //    seats the agent, offers hands-free play) entirely from {venue, spec} —
   //    seating via spec.client.join, observe/act endpoints via spec.routes, the
