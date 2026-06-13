@@ -1,5 +1,15 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { fetchSpec, playActionTypes, createSoccerTools, type GameSpec, type PluginCfg } from "./tools.js";
+import { fetchSpec, playActionTypes, type GameSpec, type PluginCfg } from "./tools.js";
+import { generateVenueTools } from "./generate.js";
+
+const SOCCER_VENUE = { id: "agent-soccer", origin: "pitch", specUrl: "/spec" };
+function withClient(spec: GameSpec): GameSpec {
+  return { ...spec, routes: { act: "/matches/{matchId}/players/{playerId}/action", observe: "/matches/{matchId}/agents/{did}/observe" },
+    client: { prefix: "soccer", noun: "match",
+      join: { tool: "soccer_join", route: "/quickmatch", params: {}, seat: { id: "matchId", token: "token", controls: "playerIds" }, summary: "join" },
+      observe: { tool: "soccer_observe", params: {}, summary: "see" },
+      act: { tool: "soccer_play", params: {}, summary: "order" } } };
+}
 
 // A FIXTURE manifest with a FAKE action the static list never had. Adding it
 // here must surface it in the generated tool with zero further code change.
@@ -53,21 +63,12 @@ describe("Phase 4 — soccer tools generate from /spec (static fallback when abs
     expect(await fetchSpec(cfg())).toBeNull();
   });
 
-  it("createSoccerTools wires the spec into soccer_play's action enum", () => {
-    const tools = createSoccerTools({ pluginConfig: cfg({ mode: "easy" }), config: {} } as any, FIXTURE);
+  it("the generated soccer_play (batch) carries the spec's action enum (fake action included)", () => {
+    const tools = generateVenueTools(SOCCER_VENUE, withClient(FIXTURE), cfg());
     const play = tools.find(t => t.name === "soccer_play")!;
-    const moveSchema: any = (play.parameters as any).properties.moves.items;
-    const actionEnum: string[] = moveSchema.properties.action.anyOf.map((s: any) => s.const);
-    expect(actionEnum).toContain("teleport");
-  });
-
-  it("createSoccerTools without a spec keeps the static play vocabulary", () => {
-    const tools = createSoccerTools({ pluginConfig: cfg({ mode: "easy" }), config: {} } as any);
-    const play = tools.find(t => t.name === "soccer_play")!;
-    const moveSchema: any = (play.parameters as any).properties.moves.items;
-    const actionEnum: string[] = moveSchema.properties.action.anyOf.map((s: any) => s.const);
-    expect(actionEnum).toContain("chase");
-    expect(actionEnum).not.toContain("teleport");
+    const enumList: string[] = (play.parameters as any).properties.moves.items.properties.type.enum;
+    expect(enumList).toContain("teleport"); // a server-added action surfaces with zero plugin edit
+    expect(enumList).toContain("shoot");
   });
 });
 

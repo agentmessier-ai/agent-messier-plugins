@@ -1,16 +1,45 @@
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { createSoccerTools, pitchClient, agentIdOf, type PluginCfg } from "./src/tools.js";
+import { memberTools, venuesTool, agentIdOf, identityOf, venueUrl, type PluginCfg } from "./src/tools.js";
+import { defaultVenueTools, defaultRealtimeVenue, joinVenue } from "./src/generate.js";
 import { startObserveWatcher } from "./src/watcher.js";
 import { session } from "./src/state.js";
 
+/** A lobby row is "ours" if it references our agentId anywhere (soccer puts it in
+ *  sides.home/away; a generic venue may shape it differently). Deep, shape-blind. */
+function referencesAgent(value: unknown, agentId: string): boolean {
+  if (value === agentId) return true;
+  if (Array.isArray(value)) return value.some((v) => referencesAgent(v, agentId));
+  if (value && typeof value === "object") return Object.values(value).some((v) => referencesAgent(v, agentId));
+  return false;
+}
+const ENDED = new Set(["ended", "finished", "completed", "done", "cancelled", "canceled"]);
+
 export default function register(api: OpenClawPluginApi) {
-  // 1. Tools: matchmaking (find/create/join — how a human gets their agent into
-  //    a game by chatting) + play tools (tier chosen by config.mode).
-  for (const tool of createSoccerTools(api)) {
+  const cfg = (api.pluginConfig ?? {}) as PluginCfg;
+
+  // 1. Tools: per-venue lifecycle tools GENERATED from each venue's spec
+  //    (soccer_matches/join/observe/play, work_observe/act, …) + soccer member
+  //    perks (skins/rename/claim) + the platform `venues` registry tool. A new
+  //    venue appears here from its spec with zero plugin code.
+  for (const tool of [...defaultVenueTools(cfg), ...memberTools(cfg), venuesTool(cfg)]) {
     api.registerTool(tool as AnyAgentTool);
   }
 
-  const cfg = (api.pluginConfig ?? {}) as PluginCfg;
+  // 2. Autoplay watcher. It drives ONE realtime venue (streams observations,
+  //    seats the agent, offers hands-free play) entirely from {venue, spec} —
+  //    seating via spec.client.join, observe/act endpoints via spec.routes, the
+  //    move prompt naming spec.client.act.tool. No venue is hardcoded here;
+  //    soccer is simply the only realtime venue today. Seatless/poll venues
+  //    (taskmarket) have no autoplay loop, so the service no-ops for them.
+  const realtime = defaultRealtimeVenue();
+  if (!realtime) return;
+  const { venue, spec } = realtime;
+  const label = venue.id;
+  const actTool = spec.client!.act.tool;
+  const lobbyRoute = spec.client?.lobby?.route;
+  const roomIdField = spec.client?.join?.seat.id ?? "id";
+  const base = venueUrl(venue.origin, cfg);
+
   const sessionKey =
     cfg.sessionKey ??
     ((api.config.hooks as Record<string, unknown> | undefined)?.defaultSessionKey as string | undefined);
@@ -19,35 +48,37 @@ export default function register(api: OpenClawPluginApi) {
   let poller: ReturnType<typeof setInterval> | null = null;
 
   api.registerService({
-    id: "agentnet-soccer-watcher",
+    id: `agentnet-${venue.id}-watcher`,
 
     start: async (ctx) => {
       const agentId = agentIdOf(cfg);
-      const client = pitchClient(cfg);
+      // Config-derived join body. For soccer these are teamSize/team/identity; a
+      // venue whose spec doesn't use them simply leaves the cfg fields unset and
+      // the server ignores the extras. joinVenue itself stays venue-agnostic.
+      const joinExtra = (): Record<string, unknown> => ({ teamSize: cfg.teamSize, team: cfg.team, identity: identityOf(cfg) });
 
-      // Join a room (taking a WHOLE side) and (re)start the observation loop.
-      // Installed into shared state so the matchmaking tools can invoke it.
-      session.joinAndWatch = async (matchId, team) => {
-        const seat = await client.join(matchId, agentId, team);
-        session.matchId = matchId;
-        session.players = seat.playerIds;
-        ctx.logger.info(`[agentnet-soccer] ${agentId} joined ${matchId} as ${seat.team} (${seat.playerIds.length} players)${seat.started ? " — match live" : " — waiting for opponent"}`);
+      // Seat into a room (matchId omitted = quickmatch find-or-create) and
+      // (re)start the observation loop. Installed into shared state so the
+      // generated *_join tool / chat handoff can drive it.
+      session.joinAndWatch = async (matchId, params) => {
+        const seat = await joinVenue(venue, spec, cfg, { matchId, params: params ?? {}, extra: joinExtra() });
+        ctx.logger.info(`[${label}] ${agentId} seated in ${seat.id} (${seat.controls?.length ?? 0} to control)${seat.started ? " — live" : " — waiting for opponent"}`);
 
         controller?.abort(); // leaving a previous room
         controller = new AbortController();
         let move = 0;
         // Fire-and-forget: the watcher runs until aborted or the gateway stops.
         void startObserveWatcher(
-          { serverUrl: cfg.serverUrl, matchId, agentId, mode: cfg.mode, strategyFile: cfg.strategyFile },
+          { serverUrl: cfg.serverUrl, matchId: seat.id!, agentId, mode: cfg.mode, strategyFile: cfg.strategyFile, actTool, label },
           async (msg) => {
             if (!sessionKey) {
-              ctx.logger.warn("[agentnet-soccer] no sessionKey configured; cannot deliver move prompts.");
+              ctx.logger.warn(`[${label}] no sessionKey configured; cannot deliver move prompts.`);
               return;
             }
             // Fresh session per move: each prompt is a complete snapshot, so the
             // agent needs no history — keeps context from overflowing.
             const turn = move++;
-            const idempotencyKey = `agentnet-soccer:${matchId}:${agentId}:${turn}`;
+            const idempotencyKey = `agentnet:${venue.id}:${seat.id}:${agentId}:${turn}`;
             const { runId } = await api.runtime.subagent.run({
               sessionKey: `${sessionKey}:${turn}`,
               message: msg,
@@ -60,17 +91,16 @@ export default function register(api: OpenClawPluginApi) {
             signal: controller.signal,
             logger: ctx.logger,
             onReclaim: async () => {
-              // Server restarted and forgot us — retake our seat in the room,
-              // or (room gone entirely) quick-match into a fresh one.
+              // Server restarted and forgot us — re-seat into the same room via
+              // seatRoute, or (room gone) quickmatch into a fresh one.
               try {
-                const again = await client.join(matchId, agentId, team);
-                session.players = again.playerIds;
-                ctx.logger.info(`[agentnet-soccer] re-joined ${matchId} as ${again.team} after server restart`);
+                const again = await joinVenue(venue, spec, cfg, { matchId: seat.id, extra: joinExtra() });
+                ctx.logger.info(`[${label}] re-seated in ${again.id} after server restart`);
               } catch (e) {
                 if (!cfg.autoJoin) throw e;
-                const q = await client.quickMatch(agentId, team ? { team } : {});
-                ctx.logger.info(`[agentnet-soccer] room ${matchId} gone — quick-matched into ${q.matchId}`);
-                if (q.matchId !== matchId) void session.joinAndWatch!(q.matchId, team);
+                const q = await joinVenue(venue, spec, cfg, { extra: joinExtra() });
+                ctx.logger.info(`[${label}] room ${seat.id} gone — re-quickmatched into ${q.id}`);
+                if (q.id !== seat.id) void session.joinAndWatch!(undefined);
               }
             },
           },
@@ -78,39 +108,39 @@ export default function register(api: OpenClawPluginApi) {
         return seat;
       };
 
-      // Startup seating: a pinned matchId joins that room; autoJoin quick-matches
-      // (find-or-create, atomic server-side); otherwise idle until the human
-      // asks the agent to find/create a game.
+      // Startup seating: a pinned matchId seats that room; autoJoin quick-matches
+      // (find-or-create, atomic server-side); otherwise idle until asked.
       try {
-        if (cfg.matchId) await session.joinAndWatch(cfg.matchId, cfg.team);
-        else if (cfg.autoJoin) {
-          const q = await client.quickMatch(agentId, cfg.team ? { team: cfg.team } : {});
-          await session.joinAndWatch(q.matchId, cfg.team);
-        } else {
-          ctx.logger.info("[agentnet-soccer] idle — ask me to join or create a game.");
-        }
-      } catch (e) { ctx.logger.error(`[agentnet-soccer] startup seating failed: ${String(e)}`); }
+        if (cfg.matchId) await session.joinAndWatch(cfg.matchId);
+        else if (cfg.autoJoin) await session.joinAndWatch(undefined);
+        else ctx.logger.info(`[${label}] idle — ask me to join or create a game.`);
+      } catch (e) { ctx.logger.error(`[${label}] startup seating failed: ${String(e)}`); }
 
-      // Seat poller: a human may seat this agent from a CHAT process (which has
-      // no watcher). Watch the lobby for a seat held by our agentId and aim the
-      // playing loop at it whenever it differs from what we're watching.
-      const base = (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
-      poller = setInterval(async () => {
-        try {
-          const res = await fetch(`${base}/matches`);
-          if (!res.ok) return;
-          const { matches } = (await res.json()) as { matches: { id: string; status: string; sides: { home: string | null; away: string | null } }[] };
-          const seat = matches.find(r => r.status !== "ended" && (r.sides.home === agentId || r.sides.away === agentId));
-          if (seat && seat.id !== session.matchId) {
-            ctx.logger.info(`[agentnet-soccer] found my seat in ${seat.id} (taken via chat) — starting to play`);
-            await session.joinAndWatch!(seat.id);
-          }
-        } catch { /* server down — the watcher's own backoff handles it */ }
-      }, 10_000);
+      // Seat poller: a seat may be taken from ANOTHER process (a chat turn, the
+      // generated *_join tool, the dashboard). Poll the venue's lobby for a
+      // non-ended room that references our agentId and aim the loop at it. Driven
+      // by spec.client.lobby.route — no hardcoded /matches path. Skipped for
+      // venues with no lobby in their spec.
+      if (lobbyRoute) {
+        poller = setInterval(async () => {
+          try {
+            const res = await fetch(`${base}${lobbyRoute}`);
+            if (!res.ok) return;
+            const data = (await res.json()) as Record<string, any>;
+            const rows = (data.matches ?? data.rows ?? []) as Record<string, any>[];
+            const mine = rows.find((r) => !ENDED.has(String(r.status ?? "")) && referencesAgent(r, agentId));
+            const id = mine?.id ?? mine?.[roomIdField];
+            if (id && id !== session.matchId) {
+              ctx.logger.info(`[${label}] found my seat in ${id} (taken elsewhere) — starting to play`);
+              await session.joinAndWatch!(id);
+            }
+          } catch { /* server down — the watcher's own backoff handles it */ }
+        }, 10_000);
+      }
     },
 
     stop: async (ctx) => {
-      ctx.logger.info("[agentnet-soccer] watcher stopping");
+      ctx.logger.info(`[${label}] watcher stopping`);
       if (poller) { clearInterval(poller); poller = null; }
       controller?.abort();
       controller = null;

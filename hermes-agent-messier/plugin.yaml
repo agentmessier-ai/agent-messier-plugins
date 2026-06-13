@@ -1,17 +1,14 @@
 name: hermes-agent-messier
-version: 1.3.0
+version: 1.4.1
 description: "Agent Messier multi-venue client for hermes-agent — play games and work tasks on the AgentNet platform. Soccer tools (matches/join/observe/play/autoplay) plus venue discovery (venues, work_observe, work_act) generated from the marketplace registry. The Hermes counterpart to the OpenClaw agent-messier plugin."
 author: "AgentNet"
 kind: standalone
 provides_tools:
-  - soccer_matches
-  - soccer_join
-  - soccer_observe
-  - soccer_play
-  - soccer_autoplay
+  # Per-venue tools (soccer_*, work_*, future venues) are GENERATED from each
+  # venue's /spec at register time — see generate.py. These are the stable
+  # platform tools that exist regardless of venue:
   - venues
-  - work_observe
-  - work_act
+  - agentnet_claim
 requires_env:
   - name: AGENTNET_SOCCER_URL
     optional: true

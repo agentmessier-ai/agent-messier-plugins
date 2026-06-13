@@ -1,9 +1,15 @@
 /**
- * Soccer team-observation watcher — background SSE loop that feeds the agent.
+ * Autoplay observation watcher — a background SSE loop that feeds the agent.
  *
- * Subscribes to GET /matches/:id/agents/:agentId/observe, which streams a
- * TeamView (the agent's whole side) every tick (10 Hz). We never block the
- * match: the reader keeps only the LATEST view; a single in-flight delivery
+ * Venue-agnostic at runtime: the observe endpoint comes from spec.routes, the
+ * move prompt is the server's spec.instructions + rendered summary, and the act
+ * tool it names comes from spec.client.act.tool (passed as cfg.actTool). The
+ * soccer specifics that remain are only the frame TYPE (TeamView) and the
+ * describeTeam fallback renderer used when a server sends no instructions.
+ *
+ * Subscribes to the observe route, which streams a view (the agent's whole side
+ * in soccer) every tick. We never block the match: the reader keeps only the
+ * LATEST view; a single in-flight delivery
  * feeds the agent the freshest state one decision at a time. While the agent is
  * thinking, new frames just update `latest`; when it finishes it gets the
  * newest state. Once the match ends, delivery stops (no prompt = no LLM call).
@@ -24,6 +30,11 @@ export type WatcherCfg = {
   mode?: "easy" | "advanced" | "both";
   /** Human-editable strategy.md injected into the move prompt (Phase 5). */
   strategyFile?: string;
+  /** The venue's act tool (spec.client.act.tool) named in the move prompt.
+   *  Default "soccer_play" so a pre-VA-5 caller is unchanged. */
+  actTool?: string;
+  /** Log tag for this venue's watcher (e.g. "agent-soccer"). Default "agentnet". */
+  label?: string;
 };
 
 // ── human-editable strategy (Phase 5) ────────────────────────────────────────
@@ -80,7 +91,7 @@ export function parseSseBlock(block: string): { event?: string; data?: string } 
   return event !== undefined ? { event, ...(data !== undefined ? { data } : {}) } : (data !== undefined ? { data } : {});
 }
 
-export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advanced" | "both", strategyFile?: string, spec?: GameSpec | null): string {
+export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advanced" | "both", strategyFile?: string, spec?: GameSpec | null, actTool = "soccer_play"): string {
   const standing = strategyText(strategyFile);
   const stratBlock = standing ? `## Your manager's standing instructions\n${standing}\n\n` : "";
   const ins = spec?.instructions;
@@ -94,18 +105,29 @@ export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advan
       stratBlock +
       `${v.summary}\n\n` +
       `${ins.play}\n\n` +
-      `Decide and act now: make ONE call to your play tool with a move for every player you control. ` +
+      `Decide and act now: make ONE ${actTool} call with a move for every player you control. ` +
       `Each is a standing order until you change it.`
     );
   }
-  // Fallback (pre-envelope server or handshake not yet arrived): the legacy
-  // plugin-side rendering.
+  // Fallback (pre-envelope server or handshake not yet arrived). describeTeam is
+  // the soccer-specific renderer — only valid for a TeamView; for any other
+  // venue with no server instructions, dump the raw view rather than crash.
+  const rendered = Array.isArray(v.mine) ? describeTeam(v, mode) : JSON.stringify(v);
   return (
     stratBlock +
-    `${describeTeam(v, mode)}\n\n` +
-    `Decide and act now: make ONE soccer_play call with a move for every player you control. ` +
+    `${rendered}\n\n` +
+    `Decide and act now: make ONE ${actTool} call with a move for every player you control. ` +
     `Each is a standing order until you change it.`
   );
+}
+
+/** The observe path for a venue, from spec.routes ({matchId}/{did} substituted),
+ *  with the soccer-literal fallback when no spec is reachable — so the watcher
+ *  is endpoint-agnostic (a golf venue would drive the same loop) but never
+ *  breaks offline. Returns the path (no host); caller prepends the base. */
+export function observeUrl(spec: GameSpec | null, matchId: string, did: string): string {
+  const tpl = spec?.routes?.["observe"] ?? "/matches/{matchId}/agents/{did}/observe";
+  return tpl.replace("{matchId}", encodeURIComponent(matchId)).replace("{did}", encodeURIComponent(did));
 }
 
 export async function startObserveWatcher(
@@ -115,25 +137,30 @@ export async function startObserveWatcher(
 ): Promise<void> {
   const { signal, logger } = options;
   const base = (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
-  const url = `${base}/matches/${encodeURIComponent(cfg.matchId)}/agents/${encodeURIComponent(cfg.agentId)}/observe`;
+  const tag = cfg.label ?? "agentnet";       // venue-derived log prefix
+  const actTool = cfg.actTool ?? "soccer_play";
+
+  // Fetch the spec up front so the observe endpoint comes from spec.routes
+  // (venue-agnostic) rather than a literal /matches path — falls back to the
+  // soccer-literal route when no spec is reachable. Also seeds the prompt's
+  // instructions; the SSE `event: spec` handshake still refreshes it.
+  let spec: GameSpec | null = await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId);
+  const url = base + observeUrl(spec, cfg.matchId, cfg.agentId);
 
   let latest: TeamView | null = null;
   let latestSeq = 0;
   let deliveredSeq = -1;
   let busy = false;
 
-  // The match's spec snapshot (instructions frozen per game). Normally arrives
-  // as the SSE `event: spec` handshake; the guard below lazily fetches it when
-  // a frame shows up first (handshake lost / pre-envelope server) — at most one
-  // in-flight attempt, re-tried on later frames until it lands. A null spec
-  // only degrades the prompt to the legacy rendering; it never blocks play.
-  let spec: GameSpec | null = null;
+  // If the up-front fetch failed, the guard below lazily retries when a frame
+  // shows up (handshake lost / pre-envelope server) — at most one in-flight
+  // attempt. A null spec only degrades the prompt; it never blocks play.
   let specFetching = false;
   function ensureSpec() {
     if (spec !== null || specFetching) return;
     specFetching = true;
     fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId)
-      .then((s) => { if (s) { spec = s; logger?.info(`[agentnet-soccer] spec recovered via API (rulesVersion ${s.rulesVersion})`); } })
+      .then((s) => { if (s) { spec = s; logger?.info(`[${tag}] spec recovered via API (rulesVersion ${s.rulesVersion})`); } })
       .finally(() => { specFetching = false; });
   }
 
@@ -144,8 +171,8 @@ export async function startObserveWatcher(
     busy = true;
     const seq = latestSeq;
     const obs = latest;
-    Promise.resolve(deliver(prompt(obs, cfg.mode ?? "easy", cfg.strategyFile, spec)))
-      .catch((e) => logger?.error(`[agentnet-soccer] deliver failed: ${String(e)}`))
+    Promise.resolve(deliver(prompt(obs, cfg.mode ?? "easy", cfg.strategyFile, spec, actTool)))
+      .catch((e) => logger?.error(`[${tag}] deliver failed: ${String(e)}`))
       .finally(() => { deliveredSeq = seq; busy = false; maybeDeliver(); });
   }
 
@@ -156,7 +183,7 @@ export async function startObserveWatcher(
       const res = await fetch(url, { headers: { Accept: "text/event-stream" }, signal });
       if (res.status === 404 && options.onReclaim) {
         // Server forgot us (restart) — re-claim our players, then reconnect.
-        try { await options.onReclaim(); } catch (e) { logger?.warn(`[agentnet-soccer] re-claim failed: ${String(e)}`); }
+        try { await options.onReclaim(); } catch (e) { logger?.warn(`[${tag}] re-claim failed: ${String(e)}`); }
         await backoff(attempt++, signal);
         continue;
       }

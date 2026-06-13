@@ -48,6 +48,22 @@ export type GameSpec = {
   /** The self-instructable envelope — how to play, server-authored, frozen per
    *  match. Optional: absent on pre-envelope servers (fallback prompt used). */
   instructions?: { system: string; play: string; output: string };
+  /** Endpoint templates a generic client substitutes ({matchId}/{did}/{playerId}).
+   *  The watcher builds observe/act URLs from these, not literal paths. */
+  routes?: Record<string, string>;
+  /** How the venue wants to be watched (stream vs poll). */
+  observe?: { mode: string; suggestedIntervalMs: number };
+  /** The client lifecycle contract — tool names + param schemas the plugin
+   *  GENERATES its tool surface from (venue-agnostic-plugins.md). */
+  client?: {
+    prefix: string;
+    noun: string;
+    lobby?: { tool: string; route: string; params?: Record<string, unknown>; summary: string } | null;
+    join?: { tool: string; route: string; seatRoute?: string; params?: Record<string, unknown>; seat: { id: string; token: string; controls: string }; summary: string } | null;
+    observe: { tool: string; params?: Record<string, unknown>; summary: string };
+    act: { tool: string; params?: Record<string, unknown>; summary: string };
+    autoplay?: { tool: string; summary: string };
+  };
 };
 
 // STATIC FALLBACK vocabularies — used when /spec is unreachable (offline-safe).
@@ -172,7 +188,7 @@ export function pitchClient(cfg: PluginCfg) {
       const seat = matches.find(r => r.status !== "ended" && (r.sides.home === me || r.sides.away === me));
       if (seat) { session.matchId = seat.id; return encodeURIComponent(seat.id); }
     }
-    throw new Error("not in a match — use soccer_join_match or soccer_create_match first");
+    throw new Error("not in a match — use soccer_join first");
   };
   return {
     async lobby(): Promise<{ matches: { id: string; status: string; teamSize: number; maxGoals: number; score: { home: number; away: number }; sides: { home: string | null; away: string | null } }[] }> {
@@ -282,95 +298,23 @@ export function pitchClient(cfg: PluginCfg) {
   };
 }
 
-const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
-const err = (msg: string) => ({ content: [{ type: "text" as const, text: `error: ${msg}` }], isError: true });
+export const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
+export const err = (msg: string) => ({ content: [{ type: "text" as const, text: `error: ${msg}` }], isError: true });
 
-/** Resolve which player a tool call targets: explicit `player`, or the single
- *  claimed player when this agent controls exactly one. */
-function target(player?: string): { id: string } | { error: string } {
-  if (player) {
-    if (session.players.length && !session.players.includes(player)) {
-      return { error: `you don't control "${player}". Your players: ${session.players.join(", ")}` };
-    }
-    return { id: player };
-  }
-  if (session.players.length === 1) return { id: session.players[0]! };
-  return { error: `specify player="<id>" — you control: ${session.players.join(", ") || "(none yet)"}` };
+// ── venue-URL resolution (origin → base URL); kept — generate.ts imports it. ──
+const VENUE_DEFAULTS: Record<string, string> = { taskmarket: "http://localhost:3030" };
+export function venueUrl(origin: string, cfg: PluginCfg): string {
+  if (origin.startsWith("http://") || origin.startsWith("https://")) return origin;
+  if (origin === "pitch") return (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
+  return process.env[`AGENTNET_${origin.toUpperCase()}_URL`] ?? VENUE_DEFAULTS[origin] ?? (cfg.serverUrl ?? "http://localhost:3010");
 }
 
-const playerParam = Type.Optional(
-  Type.String({ description: "Which of your players to move (id, e.g. home-9). Omit only if you control exactly one." }),
-);
-
-// ── Matchmaking: how a human (chatting with their agent) gets into a game. ──
-function lobbyTools(cfg: PluginCfg): AnyAgentTool[] {
+// ── Member / account tools — soccer cosmetic + ownership, NOT lifecycle, so
+// they stay hand-written (a venue's lifecycle tools are generated; perks aren't). ──
+export function memberTools(cfg: PluginCfg): AnyAgentTool[] {
   const client = pitchClient(cfg);
   const agentId = agentIdOf(cfg);
-  const fmt = (r: { id: string; status: string; teamSize: number; score: { home: number; away: number }; sides: { home: string | null; away: string | null } }) =>
-    `${r.id}: ${r.teamSize}v${r.teamSize} [${r.status}] ${r.score.home}-${r.score.away} home=${r.sides.home ?? "OPEN"} away=${r.sides.away ?? "OPEN"}`;
-  const joinVia = async (matchId: string, team?: "home" | "away") => {
-    // In the gateway process the service installed joinAndWatch (joins AND
-    // starts the playing loop). In a chat process there is no watcher — just
-    // take the seat on the server; the gateway's seat-poller will notice the
-    // seat within seconds and start playing.
-    if (session.joinAndWatch) return session.joinAndWatch(matchId, team);
-    const seat = await client.join(matchId, agentId, team);
-    session.matchId = matchId;
-    session.players = seat.playerIds;
-    return { ...seat, started: seat.started };
-  };
   return [
-    {
-      name: "soccer_find_matches",
-      label: "Find matches",
-      description:
-        "List open soccer rooms (the lobby): id, format (e.g. 5v5 or 11v11), status, score, which sides are OPEN. Use when the human asks to find/watch/join a game.",
-      parameters: Type.Object({
-        teamSize: Type.Optional(Type.Number({ description: "filter by players per side, e.g. 5 or 11" })),
-      }),
-      async execute(_id, params) {
-        const { matches } = await client.lobby();
-        const list = matches.filter(r => !params.teamSize || r.teamSize === params.teamSize);
-        return ok({ matches: list.map(fmt), hint: list.some(r => r.status === "waiting") ? "join a waiting room with soccer_join_match" : "no open rooms — create one with soccer_create_match" });
-      },
-    },
-    {
-      name: "soccer_create_match",
-      label: "Create a match",
-      description:
-        "Create a new room and take a side in it. The match starts automatically when an opponent joins. Use when the human says 'create a 5v5 game', 'start an 11-player match', etc.",
-      parameters: Type.Object({
-        teamSize: Type.Number({ minimum: 1, maximum: 11, description: "players per side (5 = five-a-side, 11 = standard)" }),
-        maxGoals: Type.Optional(Type.Number({ description: "match ends when total goals exceed this (default 5)" })),
-        team: Type.Optional(Type.Union([Type.Literal("home"), Type.Literal("away")])),
-      }),
-      async execute(_id, params) {
-        const { id } = await client.createRoom({ teamSize: params.teamSize, ...(params.maxGoals ? { maxGoals: params.maxGoals } : {}) });
-        const seat = await joinVia(id, params.team);
-        return ok({ matchId: id, ...seat, note: "waiting for an opponent — the match starts automatically when one joins. GIVE YOUR HUMAN the managerUrl link: it's their manager console for this room (pause/reset votes, room controls)." });
-      },
-    },
-    {
-      name: "soccer_join_match",
-      label: "Join a match",
-      description:
-        "Join a room and control a WHOLE side. With matchId: join that room. Without: quick-match — join any waiting room (optionally filtered by teamSize), or create one if none. The match starts automatically when both sides are taken.",
-      parameters: Type.Object({
-        matchId: Type.Optional(Type.String()),
-        teamSize: Type.Optional(Type.Number({ description: "quick-match filter / size for a new room (default 5)" })),
-        team: Type.Optional(Type.Union([Type.Literal("home"), Type.Literal("away")])),
-      }),
-      async execute(_id, params) {
-        let id = params.matchId;
-        if (!id) {
-          // atomic server-side find-or-create — two racing agents land in ONE room
-          const q = await client.quickMatch(agentId, { ...(params.teamSize ? { teamSize: params.teamSize } : {}), ...(params.team ? { team: params.team } : {}) });
-          id = q.matchId;
-        }
-        const seat = await joinVia(id, params.team);
-        return ok({ matchId: id, ...seat, note: (seat.started ? "opponent present — playing now!" : "seated — match starts when an opponent joins") + " GIVE YOUR HUMAN the managerUrl link: it's their manager console for this room." });
-      },
-    },
     {
       name: "soccer_credits",
       label: "Check credits",
@@ -404,18 +348,18 @@ function lobbyTools(cfg: PluginCfg): AnyAgentTool[] {
       name: "agentnet_claim_owner",
       label: "Claim owner",
       description:
-        "Link this agent to its human owner's AgentNet account. The human gets a one-time code from the AgentNet site ('Claim my agent') and tells it to you — e.g. 'claim me on AgentNet with code 7F3K-92'. Redeems the code using this agent's own API key; the human never handles the key.",
+        "Link this agent to its human owner's AgentNet account. The human gets a one-time code from the AgentNet site ('Claim my agent') and tells it to you — e.g. 'claim me on AgentNet with code 7F3K-92'. Redeems with this agent's API key (prod); on a dev pitch (no key) it self-asserts this agent's id. Either way the human never handles the key.",
       parameters: Type.Object({
         code: Type.String({ description: "the one-time claim code the human read out, e.g. 7F3K-92AB" }),
       }),
       async execute(_id, params) {
         const key = apiKeyOf(cfg);
-        if (!key) return err("no AgentNet API key configured (set plugin apiKey or AGENTNET_API_KEY)");
         const base = (cfg.accountsUrl ?? "http://localhost:3005").replace(/\/$/, "");
         const res = await fetch(`${base}/agents/claim`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({ code: params.code }),
+          headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+          // agentId lets a dev (REQUIRE_AUTH=0) agent claim without a key; prod ignores it and uses the Bearer→DID.
+          body: JSON.stringify({ code: params.code, agentId: agentIdOf(cfg) }),
         });
         const data = (await res.json().catch(() => ({}))) as any;
         if (!res.ok) return err(`claim failed: ${data.error ?? res.status}`);
@@ -454,304 +398,22 @@ function lobbyTools(cfg: PluginCfg): AnyAgentTool[] {
   ] as AnyAgentTool[];
 }
 
-function observeTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both"): AnyAgentTool {
-  const client = pitchClient(cfg);
-  const agentId = agentIdOf(cfg);
-  return {
-    name: "soccer_observe",
-    label: "Observe the pitch",
-    description:
-      "See your whole side: each player you control, the ball, teammates, opponents, score. Call this before deciding moves, then issue one action per player.",
-    parameters: Type.Object({}),
-    async execute() {
-      const v = await client.teamState(agentId);
-      return { content: [{ type: "text", text: `${describeTeam(v, mode)}\n\n${JSON.stringify(v)}` }] };
-    },
-  } as AnyAgentTool;
-}
-
-// ── Easy tier: high-level intents; the SERVER computes the geometry. ──
-function easyTools(cfg: PluginCfg): AnyAgentTool[] {
-  const client = pitchClient(cfg);
-  const act = (player: string | undefined, body: Record<string, unknown>) => {
-    const t = target(player);
-    return "error" in t ? Promise.resolve(err(t.error)) : client.action(t.id, body).then(ok);
-  };
-  return [
-    {
-      name: "soccer_chase_ball",
-      label: "Chase the ball",
-      description: "Make one of your players run to win the ball (server leads the moving ball). Use when that player does NOT have it.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "chase" }); },
-    },
-    {
-      name: "soccer_shoot",
-      label: "Shoot at goal",
-      description: "Shoot at the opponent goal. The chosen player must have the ball.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "shoot" }); },
-    },
-    {
-      name: "soccer_dribble",
-      label: "Dribble toward goal",
-      description: "Carry the ball toward goal; side veers to beat a defender. The chosen player must have the ball.",
-      parameters: Type.Object({
-        player: playerParam,
-        side: Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("forward")]),
-      }),
-      async execute(_id, params) { return act(params.player, { type: "dribble", side: params.side }); },
-    },
-    {
-      name: "soccer_pass",
-      label: "Pass to a teammate",
-      description: "Pass to the best teammate ahead (or clear forward). The chosen player must have the ball.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "pass" }); },
-    },
-    {
-      name: "soccer_press",
-      label: "Press the carrier",
-      description: "Explicitly send a player to close down the ball carrier tight (goal-side). Combine with cover/defend to shape your defence — e.g. two pressers for an aggressive press.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "press" }); },
-    },
-    {
-      name: "soccer_cover",
-      label: "Cover behind the press",
-      description: "Explicitly position a player as the second defender — deeper on the carrier-goal line, catching the carrier if your presser is beaten.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "cover" }); },
-    },
-    {
-      name: "soccer_defend",
-      label: "Defend / contain",
-      description: "Have a player defend: the server keeps it goal-side of the ball carrier and contains it (no ball needed). Use for players off the ball when the opponent has it.",
-      parameters: Type.Object({ player: playerParam }),
-      async execute(_id, params) { return act(params.player, { type: "defend" }); },
-    },
-  ] as AnyAgentTool[];
-}
-
-// ── Advanced tier: raw run/kick; the AGENT computes the geometry (this +x frame). ──
-function advancedTools(cfg: PluginCfg): AnyAgentTool[] {
-  const client = pitchClient(cfg);
-  const act = (player: string | undefined, body: Record<string, unknown>) => {
-    const t = target(player);
-    return "error" in t ? Promise.resolve(err(t.error)) : client.action(t.id, body).then(ok);
-  };
-  return [
-    {
-      name: "soccer_run",
-      label: "Run",
-      description: "Run a set DISTANCE (metres) toward dir, then stop. dir is in your +x attacking frame.",
-      parameters: Type.Object({
-        player: playerParam,
-        dirX: Type.Number(), dirY: Type.Number(),
-        distance: Type.Number({ minimum: 0, maximum: 105 }),
-      }),
-      async execute(_id, params) {
-        return act(params.player, { type: "run", dir: { x: Number(params.dirX) || 0, y: Number(params.dirY) || 0 }, distance: params.distance });
-      },
-    },
-    {
-      name: "soccer_kick",
-      label: "Kick",
-      description: "Kick the ball (player must have it). power 0..1 (~50m). dir is in your +x attacking frame.",
-      parameters: Type.Object({
-        player: playerParam,
-        dirX: Type.Number(), dirY: Type.Number(),
-        power: Type.Number({ minimum: 0, maximum: 1 }),
-      }),
-      async execute(_id, params) {
-        return act(params.player, { type: "kick", dir: { x: Number(params.dirX) || 0, y: Number(params.dirY) || 0 }, power: params.power });
-      },
-    },
-  ] as AnyAgentTool[];
-}
-
-function moveToBody(m: Record<string, unknown>): Record<string, unknown> {
-  switch (m.action) {
-    case "chase": return { type: "chase" };
-    case "shoot": return { type: "shoot" };
-    case "dribble": return { type: "dribble", side: (m.side as string) ?? "forward" };
-    case "pass": return { type: "pass" };
-    case "defend": return { type: "defend" };
-    case "press": return { type: "press" };
-    case "cover": return { type: "cover" };
-    case "stop": return { type: "stop" };
-    case "run": return { type: "run", dir: { x: Number(m.dirX) || 0, y: Number(m.dirY) || 0 }, distance: Number(m.distance) || 0 };
-    case "kick": return { type: "kick", dir: { x: Number(m.dirX) || 0, y: Number(m.dirY) || 0 }, power: Number(m.power) ?? 1 };
-    default: return { type: "stop" };
-  }
-}
-
-// One tool call that moves EVERY player you control — a move per player. This
-// is the preferred way to play a multi-player side: one call instead of N.
-function playTool(cfg: PluginCfg, mode: "easy" | "advanced" | "both", spec: GameSpec | null = null): AnyAgentTool {
-  const client = pitchClient(cfg);
-  // Phase 4: the action enum is GENERATED from the /spec manifest when reachable
-  // (a new server action surfaces here with no plugin edit), else static fallback.
-  const acts = playActionTypes(spec, mode);
-  const move = Type.Object({
-    player: Type.String({ description: "one of your players (id, e.g. home-9)" }),
-    action: Type.Union(acts.map((a) => Type.Literal(a)), { description: "what that player should do" }),
-    side: Type.Optional(Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("forward")], { description: "for dribble" })),
-    dirX: Type.Optional(Type.Number()), dirY: Type.Optional(Type.Number()),
-    distance: Type.Optional(Type.Number()), power: Type.Optional(Type.Number()),
-    say: Type.Optional(Type.String({ description: "short in-character shout shown over this player (≤60 chars). FREE for everyone — banter makes the match fun to watch" })),
-  });
-  const specHints = spec?.actions.descriptions
-    ? acts.filter((a) => spec.actions.descriptions![a]).map((a) => `${a}: ${spec.actions.descriptions![a]}`).join("; ")
-    : "";
-  return {
-    name: "soccer_play",
-    label: "Move all players",
-    description:
-      "Set actions for ALL the players you control in ONE call: pass moves=[{player, action, ...}] with one entry per player. Each move may include say: a short shout your player yells on the pitch (spectators see it — give your team a voice and personality!). Prefer this over calling a per-player tool N times. " +
-      `action ∈ ${acts.join("|")}.` +
-      (acts.includes("run") || acts.includes("kick") ? " (run/kick need dirX,dirY + distance/power; dribble takes side)." : " (dribble takes side).") +
-      (specHints ? " Actions — " + specHints : ""),
-    parameters: Type.Object({ moves: Type.Array(move, { description: "one move per player you control" }) }),
-    async execute(_id, params) {
-      const applied: unknown[] = [];
-      for (const m of params.moves as Record<string, unknown>[]) {
-        const t = target(m.player as string);
-        if ("error" in t) { applied.push({ player: m.player, error: t.error }); continue; }
-        try {
-          const body = moveToBody(m);
-          if (typeof m.say === "string" && m.say.trim()) body.say = m.say;
-          await client.action(t.id, body);
-          applied.push({ player: t.id, action: m.action });
-        }
-        catch (e) { applied.push({ player: m.player, error: String(e) }); }
-      }
-      return ok({ applied });
-    },
-  } as AnyAgentTool;
-}
-
-
-// ── Multi-venue (marketplace-unification.md §5.3) ─────────────────────────────
-// The plugin is a PLATFORM client: venues (games AND work markets) come from
-// the registry; each venue's spec publishes actions + ROUTE TEMPLATES, so
-// acting on a venue needs zero venue-specific code.
-
-const VENUE_DEFAULTS: Record<string, string> = { taskmarket: "http://localhost:3030" };
-const venueSpecs = new Map<string, GameSpec & { routes?: Record<string, string> }>();
-
-/** Test seam: drop cached venue specs. */
-export function _resetVenueCache(): void { venueSpecs.clear(); }
-
-function venueUrl(origin: string, cfg: PluginCfg): string {
-  if (origin.startsWith("http://") || origin.startsWith("https://")) return origin;
-  if (origin === "pitch") return (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
-  return process.env[`AGENTNET_${origin.toUpperCase()}_URL`] ?? VENUE_DEFAULTS[origin] ?? (cfg.serverUrl ?? "http://localhost:3010");
-}
-
-async function venueSpec(origin: string, cfg: PluginCfg): Promise<(GameSpec & { routes?: Record<string, string> }) | null> {
-  const cached = venueSpecs.get(origin);
-  if (cached) return cached;
-  try {
-    const res = await fetch(`${venueUrl(origin, cfg)}/spec`);
-    if (!res.ok) return null;
-    const spec = (await res.json()) as GameSpec & { routes?: Record<string, string> };
-    if (!spec || !Array.isArray(spec.actions?.enum)) return null;
-    venueSpecs.set(origin, spec);
-    return spec;
-  } catch { return null; }
-}
-
-function venueTools(cfg: PluginCfg): AnyAgentTool[] {
+// ── Platform tool: the marketplace registry (venue-agnostic). ──
+export function venuesTool(cfg: PluginCfg): AnyAgentTool {
   const base = (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
-  const did = () => agentIdOf(cfg);
-  return [
-    {
-      name: "venues",
-      label: "Platform venues",
-      description: "List every venue on the AgentNet platform — games (agent-soccer; golf later) and work marketplaces (taskmarket: agent-to-agent paid tasks). Use to discover where you can play or earn.",
-      parameters: Type.Object({}),
-      async execute() {
-        try {
-          const res = await fetch(`${base}/platform/marketplaces`);
-          if (!res.ok) return ok({ error: `registry unavailable (${res.status})` });
-          const { marketplaces } = (await res.json()) as { marketplaces: Record<string, unknown>[] };
-          return ok({ venues: marketplaces.map(v => ({ id: v["id"], name: v["name"], kind: v["kind"], origin: v["origin"], feeBps: v["feeBps"], status: v["status"] })),
-            hint: "games: soccer_* tools. work: work_observe to see the market, work_act to post/bid/deliver/confirm." });
-        } catch (e) { return ok({ error: String(e) }); }
-      },
+  return {
+    name: "venues",
+    label: "Platform venues",
+    description: "List every venue on the AgentNet platform — games (agent-soccer; golf later) and work marketplaces (taskmarket). Each venue's own tools (soccer_join, work_act, …) are GENERATED from its spec. Use to discover where you can play or earn.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      try {
+        const res = await fetch(`${base}/platform/marketplaces`);
+        if (!res.ok) return ok({ error: `registry unavailable (${res.status})` });
+        const { marketplaces } = (await res.json()) as { marketplaces: Record<string, unknown>[] };
+        return ok({ venues: marketplaces.map(v => ({ id: v["id"], name: v["name"], kind: v["kind"], origin: v["origin"], feeBps: v["feeBps"], status: v["status"] })),
+          hint: "each venue has its own generated tools — games: {id}_join/observe/play; work: work_observe/work_act." });
+      } catch (e) { return ok({ error: String(e) }); }
     },
-    {
-      name: "work_observe",
-      label: "Observe the task market",
-      description: "Look at the task marketplace from your point of view: events since your cursor, tasks you posted (with bids), tasks you're working, and what's open for bidding — plus a summary and per-task legalActions. Call before work_act.",
-      parameters: Type.Object({ cursor: Type.Optional(Type.Number({ description: "event cursor from your previous observe (default 0)" })) }),
-      async execute(_id, params) {
-        const spec = await venueSpec("taskmarket", cfg);
-        if (!spec) return ok({ error: "taskmarket venue unreachable — try again later" });
-        const path = String(spec.routes?.["observe"] ?? "/agents/{did}/observe").replace("{did}", did());
-        try {
-          const res = await fetch(`${venueUrl("taskmarket", cfg)}${path}?cursor=${Number(params.cursor ?? 0)}`, { headers: { "x-caller-did": did() } });
-          const body = await res.json();
-          if (!res.ok) return ok({ error: (body as { error?: string }).error ?? `observe failed (${res.status})` });
-          return ok({ ...(body as Record<string, unknown>), hint: "act with work_act; only actions in a task's legalActions will succeed." });
-        } catch (e) { return ok({ error: String(e) }); }
-      },
-    },
-    {
-      name: "work_act",
-      label: "Act in the task market",
-      description: "Act in the task marketplace: post a task (title/description/budget), bid (taskId/price/message), accept a bid (taskId/bidId), deliver (taskId/result), confirm/cancel/dispute (taskId). Escrow and payment are platform-handled.",
-      parameters: Type.Object({
-        action: Type.String({ description: "one of the venue's published actions" }),
-        taskId: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
-        description: Type.Optional(Type.String()), budget: Type.Optional(Type.Number()),
-        price: Type.Optional(Type.Number()), message: Type.Optional(Type.String()),
-        etaHours: Type.Optional(Type.Number()), bidId: Type.Optional(Type.String()),
-        result: Type.Optional(Type.String()),
-      }),
-      async execute(_id, params) {
-        const spec = await venueSpec("taskmarket", cfg);
-        if (!spec) return ok({ error: "taskmarket venue unreachable — try again later" });
-        const enumList = spec.actions.enum;
-        if (!enumList.includes(params.action)) return ok({ error: `action must be one of ${JSON.stringify(enumList)}` });
-        const path = String(spec.routes?.["act"] ?? "/agents/{did}/action").replace("{did}", did());
-        const body: Record<string, unknown> = { type: params.action };
-        for (const k of ["taskId", "title", "description", "budget", "price", "message", "etaHours", "bidId", "result"] as const) {
-          if (params[k] !== undefined) body[k] = params[k];
-        }
-        try {
-          const res = await fetch(`${venueUrl("taskmarket", cfg)}${path}`, {
-            method: "POST", headers: { "content-type": "application/json", "x-caller-did": did() }, body: JSON.stringify(body),
-          });
-          const out = await res.json();
-          if (!res.ok) return ok({ error: (out as { error?: string }).error ?? `act failed (${res.status})`, ...(out as Record<string, unknown>) });
-          return ok({ result: out, hint: "work_observe again to see the new state." });
-        } catch (e) { return ok({ error: String(e) }); }
-      },
-    },
-  ];
-}
-
-export function createSoccerTools(api: OpenClawPluginApi, spec: GameSpec | null = null): AnyAgentTool[] {
-  const cfg = (api.pluginConfig ?? {}) as PluginCfg;
-  const mode = cfg.mode ?? "easy";
-
-  const tools: AnyAgentTool[] = [...lobbyTools(cfg), observeTool(cfg, mode), playTool(cfg, mode, spec), ...venueTools(cfg)];
-  if (mode === "easy" || mode === "both") tools.push(...easyTools(cfg));
-  if (mode === "advanced" || mode === "both") tools.push(...advancedTools(cfg));
-
-  const client = pitchClient(cfg);
-  tools.push({
-    name: "soccer_stop",
-    label: "Stop",
-    description: "Stop one of your players (clears its standing order).",
-    parameters: Type.Object({ player: playerParam }),
-    async execute(_id, params) {
-      const t = target(params.player);
-      return "error" in t ? err(t.error) : ok(await client.action(t.id, { type: "stop" }));
-    },
-  } as AnyAgentTool);
-
-  return tools;
+  } as AnyAgentTool;
 }

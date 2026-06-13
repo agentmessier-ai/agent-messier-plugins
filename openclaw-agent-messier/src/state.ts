@@ -19,5 +19,8 @@ export const session: {
   did: string | null
   turn: number
   lockstep: boolean
-  joinAndWatch: ((matchId: string, team?: "home" | "away") => Promise<{ team: string; playerIds: string[]; started: boolean }>) | null
+  /** Installed by the service: seat into a venue room (matchId omitted = quickmatch
+   *  find-or-create) and start the observe/act loop. `params` are venue join params
+   *  (e.g. teamSize/team for soccer). Returns the seat the loop is now driving. */
+  joinAndWatch: ((matchId?: string, params?: Record<string, unknown>) => Promise<{ id?: string; controls?: string[]; started?: boolean }>) | null
 } = { matchId: null, players: [], token: null, did: null, turn: 0, lockstep: false, joinAndWatch: null }

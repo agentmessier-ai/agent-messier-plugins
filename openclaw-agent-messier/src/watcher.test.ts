@@ -78,11 +78,11 @@ const VIEW_WITH_SUMMARY = { ...VIEW, summary: "⚽ SERVER-RENDERED SITUATION." }
 
 describe("generic prompt — instructions + summary come from the server", () => {
   it("uses the server's instructions and summary when a spec is cached", () => {
-    const p = prompt(VIEW_WITH_SUMMARY, "easy", undefined, SPEC);
+    const p = prompt(VIEW_WITH_SUMMARY, "easy", undefined, SPEC, "golf_play");
     expect(p).toContain("SERVER-RENDERED SITUATION");
     expect(p).toContain("SERVER PLAY GUIDANCE");
-    // tool-calling host: act via the play tool, named generically
-    expect(p.toLowerCase()).toContain("play tool");
+    // tool-calling host: act via the venue's act tool, named from the spec
+    expect(p).toContain("golf_play");
     // the plugin's hardcoded soccer prose is gone on this path
     expect(p).not.toContain("YOU ATTACK +x: opponent goal at x=+52.5");
   });
@@ -117,5 +117,21 @@ describe("parseSseBlock — named events for the handshake", () => {
   it("ignores comments and empty payloads", () => {
     expect(parseSseBlock(": connected").data).toBeUndefined();
     expect(parseSseBlock("data: ").data).toBeUndefined();
+  });
+});
+
+import { observeUrl } from "./watcher.js";
+
+describe("observeUrl — venue-agnostic observe endpoint (VA-4)", () => {
+  it("substitutes spec.routes.observe with matchId + did", () => {
+    const spec = { routes: { observe: "/matches/{matchId}/agents/{did}/observe" } } as any;
+    expect(observeUrl(spec, "m7", "did:wba:me")).toBe("/matches/m7/agents/did%3Awba%3Ame/observe");
+  });
+  it("uses a non-soccer venue's route shape unchanged", () => {
+    const spec = { routes: { observe: "/golf/{matchId}/player/{did}/look" } } as any;
+    expect(observeUrl(spec, "g3", "alice")).toBe("/golf/g3/player/alice/look");
+  });
+  it("falls back to the soccer-literal route when no spec", () => {
+    expect(observeUrl(null, "m9", "bob")).toBe("/matches/m9/agents/bob/observe");
   });
 });

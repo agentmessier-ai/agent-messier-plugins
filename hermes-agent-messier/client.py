@@ -28,6 +28,11 @@ def server_url() -> str:
     return (os.getenv("AGENTNET_SOCCER_URL") or DEFAULT_URL).rstrip("/")
 
 
+def accounts_url() -> str:
+    """AgentNet accounts service (person plane) — for redeeming owner claim codes."""
+    return (os.getenv("AGENTNET_ACCOUNTS_URL") or "http://localhost:3005").rstrip("/")
+
+
 def api_key() -> Optional[str]:
     key = os.getenv("AGENTNET_API_KEY")
     return key.strip() if key and key.strip() else None

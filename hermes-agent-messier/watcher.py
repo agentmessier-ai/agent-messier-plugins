@@ -76,15 +76,35 @@ def _get_spec(match_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _sub(route: str, **kw: Any) -> str:
+    for k, v in kw.items():
+        route = route.replace("{" + k + "}", str(v))
+    return route
+
+
+def _routes(spec: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """The venue's endpoint templates (spec.routes) with a soccer-literal
+    fallback when no spec is reachable — so the loop is endpoint-agnostic
+    (it would drive a golf venue too) but never breaks offline."""
+    r = (spec or {}).get("routes") if isinstance(spec, dict) else None
+    return r or {
+        "state": "/matches/{matchId}/agents/{did}/state",
+        "observe": "/matches/{matchId}/agents/{did}/observe",
+        "act": "/matches/{matchId}/players/{playerId}/action",
+    }
+
+
 def _post_move(match_id: str, pid: str, action: str, say: str, token: Optional[str],
-               params: Optional[Dict[str, Any]] = None) -> None:
-    body: Dict[str, Any] = {"agentId": C.team_handle(), "type": action}
+               params: Optional[Dict[str, Any]] = None, spec: Optional[Dict[str, Any]] = None,
+               did: Optional[str] = None) -> None:
+    body: Dict[str, Any] = {"agentId": did or C.team_handle(), "type": action}
     if params:
         body.update(params)  # per-action params pass through; the server validates
     if say:
         body["say"] = say
+    path = _sub(_routes(spec)["act"], matchId=match_id, did=did or "", playerId=pid)
     try:
-        C.request("POST", f"/matches/{match_id}/players/{pid}/action", body, seat_token=token)
+        C.request("POST", path, body, seat_token=token)
     except C.PitchError:
         pass  # one dropped move never stops the loop
 
@@ -101,8 +121,11 @@ def _loop(cadence_ms: int) -> None:
             if not match_id:
                 _stop.wait(2.0)
                 continue
+            spec = _get_spec(match_id)  # per-game snapshot; ladder + retry inside
+            routes = _routes(spec)
             try:
-                view = C.request("GET", f"/matches/{match_id}/agents/{agent_id}/state")
+                obs_path = _sub(routes.get("state") or routes["observe"], matchId=match_id, did=agent_id)
+                view = C.request("GET", obs_path)
                 backoff = 1.0
             except C.PitchError as e:
                 if e.status == 404:
@@ -130,10 +153,9 @@ def _loop(cadence_ms: int) -> None:
                 _stop.wait(cadence_ms / 1000.0)
                 continue
 
-            spec = _get_spec(match_id)  # per-game snapshot; ladder + retry inside
             moves = D.decide(view, _complete, spec) if _complete else []
             for pid, action, say, params in moves:
-                _post_move(match_id, pid, action, say, token, params)
+                _post_move(match_id, pid, action, say, token, params, spec=spec, did=agent_id)
             _status.update(lastDecision=time.time(), moves=_status["moves"] + len(moves), matchId=match_id)
             if moves:
                 _log(f"[autoplay] {len(moves)} moves in {match_id}")
