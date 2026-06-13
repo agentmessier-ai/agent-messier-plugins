@@ -17,8 +17,9 @@ const GOLF_SPEC: GameSpec = {
   client: {
     prefix: "golf", noun: "round",
     lobby: { tool: "golf_rounds", route: "/rounds", params: {}, summary: "List rounds." },
-    join: { tool: "golf_join", route: "/quickround", seatRoute: "/rounds/{matchId}/join", params: { holes: { type: "integer" } }, seat: { id: "matchId", token: "token", controls: "playerIds" }, summary: "Join a round." },
+    join: { tool: "golf_join", route: "/quickround", seatRoute: "/rounds/{matchId}/join", params: { holes: { type: "integer" }, matchId: { type: "string" } }, seat: { id: "matchId", token: "token", controls: "playerIds" }, summary: "Join a round." },
     autoplay: { tool: "golf_autoplay", summary: "Hands-free." },
+    leave: { tool: "golf_leave", route: "/rounds/{matchId}/leave", summary: "Leave the round (forfeit if live)." },
     observe: { tool: "golf_observe", params: {}, summary: "See the course." },
     act: { tool: "golf_play", params: { club: { type: "string" } }, summary: "Swing." },
   },
@@ -38,7 +39,7 @@ describe("generated tool surface comes entirely from the spec", () => {
     _resetSeats();
     const tools = generateVenueTools(GOLF_VENUE, GOLF_SPEC, cfg());
     const names = tools.map(t => t.name);
-    expect(names).toEqual(["golf_rounds", "golf_join", "golf_observe", "golf_play"]);
+    expect(names).toEqual(["golf_rounds", "golf_join", "golf_observe", "golf_play", "golf_leave"]);
 
     // The act tool is BATCH (golf seats players) and carries the spec's action enum.
     const play = tools.find(t => t.name === "golf_play")!;
@@ -120,5 +121,61 @@ describe("realtime-venue detection (which venue the autoplay watcher drives)", (
     const rt = defaultRealtimeVenue();
     expect(rt?.venue.id).toBe("agent-soccer");
     expect(rt?.spec.client?.act.tool).toBe("soccer_play");
+  });
+});
+
+describe("join-by-id and leave (the lifecycle gap closed in VA-6)", () => {
+  afterEach(() => { vi.unstubAllGlobals(); _resetSeats(); });
+
+  async function exec(name: string, params: unknown) {
+    const t = generateVenueTools(GOLF_VENUE, GOLF_SPEC, cfg()).find(x => x.name === name)!;
+    const r = await t.execute("id", params as any) as { content: { text: string }[] };
+    return JSON.parse(r.content[0]!.text);
+  }
+
+  it("the join tool routes a matchId param through seatRoute (not the body)", async () => {
+    let url = "", body: any = null;
+    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => {
+      url = String(u); body = JSON.parse(init.body);
+      return { ok: true, json: async () => ({ token: "t", playerIds: ["p1"] }) } as any;
+    }));
+    const out = await exec("golf_join", { matchId: "r9", holes: 9 });
+    expect(url).toBe("http://golf.test/rounds/r9/join"); // seatRoute, not /quickround
+    expect(body.holes).toBe(9);
+    expect(body.matchId).toBeUndefined();               // matchId is routing, never a body field
+    expect(out.joined).toBe("r9");
+  });
+
+  it("omitting matchId quickmatches (find-or-create) via the join route", async () => {
+    let url = "";
+    vi.stubGlobal("fetch", vi.fn(async (u: any) => {
+      url = String(u);
+      return { ok: true, json: async () => ({ matchId: "r1", token: "t", playerIds: ["p1"] }) } as any;
+    }));
+    await exec("golf_join", { holes: 9 });
+    expect(url).toBe("http://golf.test/quickround");
+  });
+
+  it("the leave tool posts to the leave route and frees the seat locally", async () => {
+    // seat first so there's a match to leave
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ matchId: "r5", token: "t", playerIds: ["p1"] }) }) as any));
+    await joinVenue(GOLF_VENUE, GOLF_SPEC, cfg(), { matchId: "r5" });
+    expect(session.matchId).toBe("r5");
+
+    let url = "", method = "";
+    vi.stubGlobal("fetch", vi.fn(async (u: any, init?: any) => {
+      url = String(u); method = init?.method;
+      return { ok: true, json: async () => ({ left: "r5", forfeit: true, winner: "away" }) } as any;
+    }));
+    const out = await exec("golf_leave", {});
+    expect(method).toBe("POST");
+    expect(url).toBe("http://golf.test/rounds/r5/leave");
+    expect(out.left).toBe("r5");
+    expect(session.matchId).toBeNull();   // freed → ready to join elsewhere
+  });
+
+  it("leaving when not in a match is a no-op error, not a crash", async () => {
+    const out = await exec("golf_leave", {});
+    expect(out.error).toMatch(/not in a match/i);
   });
 });

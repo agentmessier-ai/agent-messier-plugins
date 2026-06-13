@@ -107,3 +107,31 @@ def test_act_coerces_dir_array_to_xy(monkeypatch):
     assert out["ok"]
     assert calls[0]["body"]["dir"] == {"x": 0.8, "y": -0.2}  # the one client fixup kept
     assert calls[0]["body"]["distance"] == 15
+
+
+def test_join_by_id_routes_to_seatroute_not_body(monkeypatch):
+    # matchId targets a specific room via seatRoute; it's routing, never a body field.
+    calls = fake(monkeypatch, {("POST", "/matches/m9/join"): {
+        "team": "home", "playerIds": ["home-9"], "did": "hermes-test", "token": "t"}})  # note: no matchId in the response
+    out = json.loads(tool("soccer_join")({"matchId": "m9", "teamSize": 5}))
+    assert out["ok"] and out["joined"] == "m9"        # seat.id falls back to the room we joined
+    assert calls[0]["path"] == "/matches/m9/join"     # seatRoute, not /quickmatch
+    assert "matchId" not in calls[0]["body"]          # routing key, kept out of the body
+    assert client.load_state()["seats"]["agent-soccer"]["id"] == "m9"
+
+
+def test_leave_posts_to_leave_route_and_frees_seat(monkeypatch):
+    client.save_state({"seats": {"agent-soccer": {"id": "m7", "agentId": "hermes-test", "controls": ["home-9"], "token": "t"}},
+                       "matchId": "m7", "token": "t"})
+    calls = fake(monkeypatch, {("POST", "/matches/m7/leave"): {"left": "m7", "forfeit": True, "winner": "away"}})
+    out = json.loads(tool("soccer_leave")({}))
+    assert out["ok"] and out["left"] == "m7"
+    assert calls[0]["path"] == "/matches/m7/leave"
+    st = client.load_state()
+    assert st["seats"].get("agent-soccer", {}) == {} and st["matchId"] is None  # freed
+
+
+def test_leave_when_not_in_a_match_is_a_clean_error(monkeypatch):
+    fake(monkeypatch, {})
+    out = json.loads(tool("soccer_leave")({}))
+    assert out["ok"] is False and "not in a match" in out["error"]

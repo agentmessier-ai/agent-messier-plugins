@@ -63,6 +63,7 @@ export type GameSpec = {
     observe: { tool: string; params?: Record<string, unknown>; summary: string };
     act: { tool: string; params?: Record<string, unknown>; summary: string };
     autoplay?: { tool: string; summary: string };
+    leave?: { tool: string; route: string; params?: Record<string, unknown>; summary: string } | null;
   };
 };
 

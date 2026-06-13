@@ -120,7 +120,10 @@ export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg)
     out.push({ name: s.tool, label: s.tool, description: s.summary, parameters: paramsSchema(s.params ?? {}),
       async execute(_id, params) {
         try {
-          const seat = await joinVenue(venue, spec, cfg, { params: params as Record<string, unknown> });
+          // matchId (if the spec advertises it) targets a SPECIFIC room via
+          // seatRoute; it's routing, not a body field, so pull it out of params.
+          const { matchId: mid, ...rest } = (params ?? {}) as Record<string, unknown>;
+          const seat = await joinVenue(venue, spec, cfg, { matchId: typeof mid === "string" && mid ? mid : undefined, params: rest });
           return ok({ joined: seat.id, yours: seat.controls, watchUrl: `${base}/matches/${seat.id}/view`, managerUrl: seat.managerUrl,
             note: `seated. observe with ${c.observe.tool}, then ${c.act.tool}.${seat.managerUrl ? " GIVE YOUR HUMAN the managerUrl — their console for this room." : ""}` });
         } catch (e) { return ok({ error: String(e instanceof Error ? e.message : e) }); }
@@ -180,6 +183,23 @@ export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg)
     }
   }
 
+  // leave — exit the current match (a forfeit if it's live). Frees the seat so
+  // the agent can join another room. Server route from spec.client.leave.
+  if (c.leave) {
+    const s = c.leave;
+    out.push({ name: s.tool, label: s.tool, description: s.summary, parameters: paramsSchema(s.params ?? {}),
+      async execute() {
+        const seat = seats.get(venue.id) ?? {}; const d = did(venue.id, cfg);
+        if (!seat.id) return ok({ error: "you are not in a match" });
+        const path = sub(s.route, { matchId: seat.id, did: d });
+        const r = await vfetch(base, path, { cfg, did: d, method: "POST", body: { agentId: d }, token: seat.token });
+        // Clear our seat either way — a failed leave shouldn't leave us wedged.
+        seats.delete(venue.id); session.matchId = null; session.players = []; session.token = null;
+        if (!r.ok) return ok({ error: r.data?.error ?? `leave ${r.status}`, note: "seat cleared locally; you can try joining again" });
+        return ok({ left: r.data?.left ?? seat.id, ...r.data, hint: `you're free — ${c.join?.tool ?? "join"} another room` });
+      } } as AnyAgentTool);
+  }
+
   return out;
 }
 
@@ -226,10 +246,11 @@ const DEFAULT_SPECS: Record<string, GameSpec> = {
     client: {
       prefix: "soccer", noun: "match",
       lobby: { tool: "soccer_matches", route: "/matches", params: { status: { type: "string", enum: ["live", "waiting", "ended"] } }, summary: "List soccer matches: live, open seats, scores." },
-      join: { tool: "soccer_join", route: "/quickmatch", seatRoute: "/matches/{matchId}/join", params: { teamSize: { type: "integer" }, team: { type: "string" }, name: { type: "string" }, nation: { type: "string" }, clan: { type: "string" }, style: { type: "string" } }, seat: { id: "matchId", token: "token", controls: "playerIds" }, summary: "Join a match and take a whole side (quickmatch). The match starts when both sides fill." },
+      join: { tool: "soccer_join", route: "/quickmatch", seatRoute: "/matches/{matchId}/join", params: { teamSize: { type: "integer" }, team: { type: "string" }, name: { type: "string" }, nation: { type: "string" }, clan: { type: "string" }, style: { type: "string" }, matchId: { type: "string", description: "join THIS room (e.g. m160) instead of quickmatch" } }, seat: { id: "matchId", token: "token", controls: "playerIds" }, summary: "Join a match and take a whole side. Pass matchId for a specific room, else quickmatch." },
       observe: { tool: "soccer_observe", params: {}, summary: "See the pitch from your side's POV: ball, your players, opponents, score." },
       act: { tool: "soccer_play", params: { dir: { type: "array", items: { type: "number" } }, distance: { type: "number" }, power: { type: "number" }, say: { type: "string" } }, summary: "Order your players — a standing action per player (run/kick need dir)." },
       autoplay: { tool: "soccer_autoplay", summary: "Hands-free play (handled by the watcher service)." },
+      leave: { tool: "soccer_leave", route: "/matches/{matchId}/leave", summary: "Leave your match (forfeit if live — opponent wins). Frees you to join another room." },
     },
   },
   "taskmarket": {

@@ -86,12 +86,20 @@ def _join_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, A
     props = step.get("params", {})
 
     def handler(args: Dict[str, Any], **_: Any) -> str:
-        body: Dict[str, Any] = {"agentId": C.team_handle(), **_whitelist(args, props)}
+        # matchId (if advertised) targets a SPECIFIC room via seatRoute; it's
+        # routing, not a body field, so keep it out of the posted body.
+        mid = args.get("matchId")
+        mid = str(mid) if isinstance(mid, str) and mid else None
+        route = _sub(step["seatRoute"], matchId=mid) if (mid and step.get("seatRoute")) else step["route"]
+        body: Dict[str, Any] = {"agentId": C.team_handle(),
+                                **{k: v for k, v in _whitelist(args, props).items() if k != "matchId"}}
         try:
-            r = C.request("POST", step["route"], body, base=_base(venue), caller_did=C.team_handle())
+            r = C.request("POST", route, body, base=_base(venue), caller_did=C.team_handle())
         except C.PitchError as e:
             return T._err(e.message, status=e.status)
-        seat = {"id": r.get(seat_map["id"]), "token": r.get(seat_map["token"]),
+        # A rejoin via seatRoute already knows the room (it's in the URL), so the
+        # response omits it — fall back to the matchId we joined with.
+        seat = {"id": r.get(seat_map["id"]) or mid, "token": r.get(seat_map["token"]),
                 "controls": r.get(seat_map["controls"], []),
                 "agentId": r.get("did") or C.team_handle()}
         _save_seat(venue["id"], seat)
@@ -168,6 +176,30 @@ def _autoplay_handler(venue: Dict[str, Any], spec: Dict[str, Any]) -> Callable[.
     return handler
 
 
+def _leave_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, Any]) -> Callable[..., str]:
+    def handler(args: Dict[str, Any], **_: Any) -> str:
+        seat = _seat(venue["id"])
+        if not seat.get("id"):
+            return T._err("you are not in a match")
+        did = _did(seat)
+        path = _sub(step["route"], matchId=seat["id"], did=did)
+        W.stop()  # leaving → stop hands-free play so it can't keep spending tokens
+        try:
+            r = C.request("POST", path, {"agentId": did}, base=_base(venue), caller_did=did, seat_token=seat.get("token"))
+        except C.PitchError as e:
+            # Free the seat locally regardless — a failed leave must not wedge us.
+            _save_seat(venue["id"], {})
+            return T._err(e.message, status=e.status)
+        _save_seat(venue["id"], {})
+        st = C.load_state()
+        st.update(matchId=None, players=[], token=None)
+        C.save_state(st)
+        body = r if isinstance(r, dict) else {}
+        return T._ok({"ok": True, "left": body.get("left", seat["id"]), **body,
+                      "hint": f"you're free — {spec['client']['join']['tool']} another room"})
+    return handler
+
+
 # ── schema builders ───────────────────────────────────────────────────────────
 def _schema(name: str, summary: str, props: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
     return {"name": name, "description": summary,
@@ -198,12 +230,13 @@ DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
         "client": {
             "prefix": "soccer", "noun": "match",
             "lobby": {"tool": "soccer_matches", "route": "/matches", "params": {"status": {"type": "string", "enum": ["live", "waiting", "ended"]}}, "summary": "List soccer matches (offline default)."},
-            "join": {"tool": "soccer_join", "route": "/quickmatch",
-                     "params": {"teamSize": {"type": "integer"}, "team": {"type": "string"}, "name": {"type": "string"}, "nation": {"type": "string"}, "clan": {"type": "string"}, "style": {"type": "string"}},
-                     "seat": {"id": "matchId", "token": "token", "controls": "playerIds"}, "summary": "Join a match and take a side."},
+            "join": {"tool": "soccer_join", "route": "/quickmatch", "seatRoute": "/matches/{matchId}/join",
+                     "params": {"teamSize": {"type": "integer"}, "team": {"type": "string"}, "name": {"type": "string"}, "nation": {"type": "string"}, "clan": {"type": "string"}, "style": {"type": "string"}, "matchId": {"type": "string", "description": "join THIS room (e.g. m160) instead of quickmatch"}},
+                     "seat": {"id": "matchId", "token": "token", "controls": "playerIds"}, "summary": "Join a match and take a side. Pass matchId for a specific room, else quickmatch."},
             "observe": {"tool": "soccer_observe", "params": {}, "summary": "See the pitch."},
             "act": {"tool": "soccer_play", "params": {"player": {"type": "string"}, "dir": {"type": "array", "items": {"type": "number"}}, "distance": {"type": "number"}, "power": {"type": "number"}, "say": {"type": "string"}}, "summary": "Order a player."},
             "autoplay": {"tool": "soccer_autoplay", "summary": "Hands-free play on/off."},
+            "leave": {"tool": "soccer_leave", "route": "/matches/{matchId}/leave", "summary": "Leave your match (forfeit if live — opponent wins). Frees you to join another room."},
         },
     },
     "taskmarket": {
@@ -285,4 +318,8 @@ def generate_venue_tools(venue: Dict[str, Any], spec: Dict[str, Any]) -> List[To
         ap = c["autoplay"]
         out.append((ap["tool"], _schema(ap["tool"], ap["summary"], _AUTOPLAY_PROPS, required=["mode"]),
                     _autoplay_handler(venue, spec), "🤖"))
+    if c.get("leave"):
+        lv = c["leave"]
+        out.append((lv["tool"], _schema(lv["tool"], lv["summary"], lv.get("params", {})),
+                    _leave_handler(venue, spec, lv), "🚪"))
     return out
