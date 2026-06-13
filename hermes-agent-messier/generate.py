@@ -173,8 +173,16 @@ def _autoplay_handler(venue: Dict[str, Any], spec: Dict[str, Any]) -> Callable[.
             return T._ok({"autoplay": "stopped"})
         cadence = int(args["cadenceMs"]) if isinstance(args.get("cadenceMs"), (int, float)) else 3000
         if W.start(cadence):
-            return T._ok({"autoplay": "running", "cadenceMs": cadence,
-                          "hint": f"playing on its own. {spec['client']['autoplay']['tool']} off to stop (and stop spending tokens)."})
+            seat = _seat(venue["id"])
+            watch_url = f"{_base(venue)}/matches/{seat['id']}/view" if seat.get("id") else None
+            out = {"autoplay": "running", "cadenceMs": cadence}
+            if watch_url:
+                out["watchUrl"] = watch_url
+            # Lead with the link so the agent SHOWS it — turning autoplay on is a
+            # common path and the human needs the watch URL to actually see the match.
+            out["hint"] = ((f"TELL YOUR HUMAN they can watch live here: {watch_url}. " if watch_url else "")
+                           + f"Playing on its own — {spec['client']['autoplay']['tool']} off to stop (and stop spending tokens).")
+            return T._ok(out)
         return T._ok({"autoplay": "running" if W.is_running() else "stopped",
                       "note": "already running, or autoplay isn't wired (host LLM unavailable)"})
     return handler

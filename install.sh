@@ -94,16 +94,21 @@ setup_hermes(){
   say "Hermes detected — installing the soccer plugin"
   hermes plugins install --force --enable "$HERMES_REPO" >/dev/null 2>&1 \
     && ok "Hermes plugin installed" || { warn "hermes plugins install failed"; return 0; }
-  # Persist the pitch URL (+ team) so future chats pick it up. Idempotent block.
-  local rc; rc="$HOME/.zshrc"; [ -n "${BASH_VERSION:-}" ] && rc="$HOME/.bashrc"
-  local mark="# >>> agent-messier soccer >>>"
-  if ! grep -qF "$mark" "$rc" 2>/dev/null; then
-    { echo ""; echo "$mark"; echo "export AGENTNET_SOCCER_URL=\"$PITCH_URL\"";
-      [ -n "${TEAM:-}" ] && echo "export AGENTNET_SOCCER_TEAM=\"$TEAM\"";
-      echo "# <<< agent-messier soccer <<<"; } >> "$rc"
-    ok "pitch URL saved to $rc"
-  fi
-  warn "open a NEW terminal (or 'source $rc') and start 'hermes chat' — then say \"join a soccer game and play\""
+  # Persist the pitch URL (+ team) the HERMES way: its managed ~/.hermes/.env,
+  # which Hermes loads into the plugin's environment on every OS/shell. A shell
+  # rc (.zshrc/.bashrc) is brittle — wrong shell, not loaded in nix/CI sessions,
+  # and (seen in the wild) prone to having stray script lines land in it. Write
+  # clean KEY=VALUE with printf (never echo a value that could be misread), and
+  # be idempotent by dropping any prior keys first.
+  local envf="${HERMES_HOME:-$HOME/.hermes}/.env"
+  mkdir -p "$(dirname "$envf")"; touch "$envf"
+  local tmp; tmp="$(mktemp)"
+  grep -vE '^(AGENTNET_SOCCER_URL|AGENTNET_SOCCER_TEAM)=' "$envf" > "$tmp" 2>/dev/null || true
+  printf 'AGENTNET_SOCCER_URL=%s\n' "$PITCH_URL" >> "$tmp"
+  [ -n "${TEAM:-}" ] && printf 'AGENTNET_SOCCER_TEAM=%s\n' "$TEAM" >> "$tmp"
+  mv "$tmp" "$envf"
+  ok "pitch URL saved to $envf (Hermes-managed — loaded on every OS/shell)"
+  warn "restart 'hermes chat' to load it — then say \"join a soccer game and play\""
 }
 
 # ── Auto-update background job (re-runs this installer in --update-only) ──────
