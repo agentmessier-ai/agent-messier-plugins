@@ -27,7 +27,10 @@ FALLBACK_INSTRUCTIONS = {
     "play": (
         "Choose ONE action per player from: " + ", ".join(ACTIONS) + ".\n"
         "Guidance: the ball-carrier should dribble or shoot if near the +x goal, else pass; "
-        "others chase/press if we don't have it, or make space (cover) if we do."
+        "others chase/press if we don't have it, or make space (cover) if we do.\n"
+        "ACT EVERY TIME YOU ARE PROMPTED — re-issue a move for every player, even if the plan is "
+        "unchanged. Orders hold until you change them, so if you go quiet your team freezes on stale "
+        "orders. Never reply without moves."
     ),
     "output": (
         'Reply with ONLY a JSON object mapping each of your player ids to an action, '

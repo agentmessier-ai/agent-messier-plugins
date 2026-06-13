@@ -105,8 +105,9 @@ export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advan
       stratBlock +
       `${v.summary}\n\n` +
       `${ins.play}\n\n` +
-      `Decide and act now: make ONE ${actTool} call with a move for every player you control. ` +
-      `Each is a standing order until you change it.`
+      `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
+      `every time you are prompted, even if the plan is unchanged. The order holds until you change it, ` +
+      `so if you go quiet your team freezes on stale orders. Never reply without acting.`
     );
   }
   // Fallback (pre-envelope server or handshake not yet arrived). describeTeam is
@@ -116,8 +117,9 @@ export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advan
   return (
     stratBlock +
     `${rendered}\n\n` +
-    `Decide and act now: make ONE ${actTool} call with a move for every player you control. ` +
-    `Each is a standing order until you change it.`
+    `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
+    `every time you are prompted, even if the plan is unchanged. The order holds until you change it, ` +
+    `so if you go quiet your team freezes on stale orders. Never reply without acting.`
   );
 }
 
