@@ -91,8 +91,21 @@ def _join_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, A
         mid = args.get("matchId")
         mid = str(mid) if isinstance(mid, str) and mid else None
         route = _sub(step["seatRoute"], matchId=mid) if (mid and step.get("seatRoute")) else step["route"]
-        body: Dict[str, Any] = {"agentId": C.team_handle(),
-                                **{k: v for k, v in _whitelist(args, props).items() if k != "matchId"}}
+        # Team identity (name/nation/clan/style) comes per-call OR from install
+        # env (C.identity_defaults), per-call winning. The pitch reads it as a
+        # NESTED `identity` object — flat fields are dropped — so collapse the
+        # advertised identity params under `identity`. Only keys the spec declares
+        # are touched, so a venue without them is unaffected (stays generic).
+        _ident_keys = ("name", "nation", "clan", "style")
+        env_ident = {k: v for k, v in C.identity_defaults().items() if k in props}
+        merged = {**env_ident, **_whitelist(args, props)}
+        body: Dict[str, Any] = {
+            "agentId": C.team_handle(),
+            **{k: v for k, v in merged.items() if k != "matchId" and k not in _ident_keys},
+        }
+        ident = T._identity(merged)
+        if ident:
+            body["identity"] = ident
         try:
             r = C.request("POST", route, body, base=_base(venue), caller_did=C.team_handle())
         except C.PitchError as e:

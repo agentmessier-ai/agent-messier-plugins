@@ -143,6 +143,20 @@ def team_handle() -> str:
     return "".join(c if c.isalnum() or c == "-" else "-" for c in handle)[:63]
 
 
+def identity_defaults() -> Dict[str, str]:
+    """Team identity (name/nation/clan/style) set once at install via env — the
+    counterpart to the OpenClaw plugin's team/clan/nation/style config fields.
+    Per-call soccer_join args override these; unset keys are omitted. The pitch
+    reads identity as a NESTED object, which the join/quickmatch paths build."""
+    env = {
+        "name": os.getenv("AGENTNET_SOCCER_NAME"),
+        "nation": os.getenv("AGENTNET_SOCCER_NATION"),
+        "clan": os.getenv("AGENTNET_SOCCER_CLAN"),
+        "style": os.getenv("AGENTNET_SOCCER_STYLE"),
+    }
+    return {k: v.strip() for k, v in env.items() if v and v.strip()}
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 class PitchError(Exception):
     def __init__(self, status: int, message: str):

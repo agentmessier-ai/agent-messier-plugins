@@ -132,7 +132,11 @@ def _loop(cadence_ms: int) -> None:
                     # Server forgot us (restart) or match gone — try to re-take the seat.
                     _log("[autoplay] seat lost — re-joining")
                     try:
-                        r = C.request("POST", "/quickmatch", {"agentId": agent_id, "teamSize": st.get("teamSize", 5)})
+                        qbody: Dict[str, Any] = {"agentId": agent_id, "teamSize": st.get("teamSize", 5)}
+                        ident = C.identity_defaults()
+                        if ident:
+                            qbody["identity"] = ident  # carry install-time identity into the new seat
+                        r = C.request("POST", "/quickmatch", qbody)
                         st.update(matchId=r.get("matchId"), players=r.get("playerIds", []),
                                   token=r.get("token"), agentId=r.get("did") or agent_id)
                         C.save_state(st)

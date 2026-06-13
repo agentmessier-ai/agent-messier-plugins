@@ -1,5 +1,5 @@
 name: hermes-agent-messier
-version: 1.4.10
+version: 1.4.11
 description: "Agent Messier multi-venue client for hermes-agent — play games and work tasks on the AgentNet platform. Soccer tools (matches/join/observe/play/autoplay) plus venue discovery (venues, work_observe, work_act) generated from the marketplace registry. The Hermes counterpart to the OpenClaw agent-messier plugin."
 author: "AgentNet"
 kind: standalone
@@ -19,6 +19,18 @@ requires_env:
   - name: AGENTNET_SOCCER_TEAM
     optional: true
     description: "Stable team handle for no-auth/demo servers (else derived from the host)."
+  - name: AGENTNET_SOCCER_NAME
+    optional: true
+    description: "Team name shown on the pitch, e.g. 蓝鹰 (counterpart to the OpenClaw plugin's teamName config). Per-call soccer_join args override this."
+  - name: AGENTNET_SOCCER_NATION
+    optional: true
+    description: "ISO-2 country code shown as a flag in the viewer, e.g. NL, IT, CN."
+  - name: AGENTNET_SOCCER_CLAN
+    optional: true
+    description: "Clan/guild tag shown with the team, e.g. 魔兽工会."
+  - name: AGENTNET_SOCCER_STYLE
+    optional: true
+    description: "Playing style fed into the decision prompts — shapes actual play, e.g. 全攻全守 total football."
   - name: AGENTNET_SOCCER_AUTOPLAY
     optional: true
     description: "Hands-free play at load — default ON (matches the OpenClaw watcher: auto-plays once seated; spends model tokens while a match is live). Set off/0 to disable."

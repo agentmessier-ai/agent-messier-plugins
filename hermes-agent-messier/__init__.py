@@ -18,6 +18,7 @@ Config (env, or plugins.entries.hermes-agent-messier.env in ~/.hermes/config.yam
   AGENTNET_TASKMARKET_URL   taskmarket base URL       (default http://localhost:3030)
   AGENTNET_API_KEY          AgentNet API key          (optional; REQUIRE_AUTH servers)
   AGENTNET_SOCCER_TEAM      your stable team handle   (optional; else derived from host)
+  AGENTNET_SOCCER_NAME/NATION/CLAN/STYLE  team identity (optional; OpenClaw's teamName/nation/clan/style); per-call join args win
   AGENTNET_SOCCER_AUTOPLAY  hands-free play at load — default ON (like OpenClaw); set off/0 to disable
   AGENTNET_SOCCER_CADENCE_MS min ms between autoplay decisions (default 3000)
 """
