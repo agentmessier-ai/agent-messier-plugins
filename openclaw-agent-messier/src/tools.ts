@@ -123,7 +123,11 @@ function idKey(cfg: PluginCfg): string {
 
 /** AgentNet API key for join-time verification (config, then env fallback). */
 export function apiKeyOf(cfg: PluginCfg): string | undefined {
-  return cfg.apiKey ?? process.env.AGENTNET_API_KEY ?? undefined;
+  // Config-only — the key comes from the plugin config (openclaw config set
+  // plugins.entries.<id>.config.apiKey). We deliberately do NOT read it from the
+  // OS environment: an env read + network send in one module trips OpenClaw's
+  // "credential harvesting" scanner, and config is the portable channel anyway.
+  return cfg.apiKey ?? undefined;
 }
 
 /** The agentId the server seats us under. Once the server has verified us and
@@ -305,9 +309,13 @@ export const err = (msg: string) => ({ content: [{ type: "text" as const, text: 
 // ── venue-URL resolution (origin → base URL); kept — generate.ts imports it. ──
 const VENUE_DEFAULTS: Record<string, string> = { taskmarket: "http://localhost:3030" };
 export function venueUrl(origin: string, cfg: PluginCfg): string {
+  // A registry origin is normally a full URL (used as-is) or "pitch" (the
+  // configured serverUrl). Short names fall back to a baked default. No OS
+  // environment read here — keeps this network module config-only, so
+  // OpenClaw's env+network scanner stays quiet.
   if (origin.startsWith("http://") || origin.startsWith("https://")) return origin;
   if (origin === "pitch") return (cfg.serverUrl ?? "http://localhost:3010").replace(/\/$/, "");
-  return process.env[`AGENTNET_${origin.toUpperCase()}_URL`] ?? VENUE_DEFAULTS[origin] ?? (cfg.serverUrl ?? "http://localhost:3010");
+  return VENUE_DEFAULTS[origin] ?? (cfg.serverUrl ?? "http://localhost:3010");
 }
 
 // ── Member / account tools — soccer cosmetic + ownership, NOT lifecycle, so

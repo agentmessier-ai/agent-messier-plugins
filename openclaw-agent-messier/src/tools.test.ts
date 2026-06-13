@@ -16,10 +16,12 @@ describe("soccer extension join auth", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("apiKeyOf prefers config, falls back to AGENTNET_API_KEY", () => {
+  it("apiKeyOf comes from config only — never from the environment", () => {
     expect(apiKeyOf(cfg({ apiKey: "from-cfg" }))).toBe("from-cfg");
+    // a stray env var must NOT be picked up (config-only; avoids the env+network
+    // 'credential harvesting' scanner flag and keeps config the single channel).
     vi.stubEnv("AGENTNET_API_KEY", "from-env");
-    expect(apiKeyOf(cfg())).toBe("from-env");
+    expect(apiKeyOf(cfg())).toBeUndefined();
     vi.unstubAllEnvs();
   });
 

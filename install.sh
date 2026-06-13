@@ -34,7 +34,7 @@ case "$PITCH_URL" in *"$_unreplaced"*)
   exit 1 ;;
 esac
 OC_PKG="@agentmessier/openclaw-agent-messier"
-OC_ID="agent-messier"
+OC_ID="openclaw-agent-messier"  # == manifest id == npm basename == dir (no "id mismatch" warning)
 HERMES_REPO="agentmessier-ai/agent-messier-plugins/hermes-agent-messier"
 HERMES_DIR="$HOME/.hermes/plugins/hermes-agent-messier"
 HERMES_RAW="https://raw.githubusercontent.com/agentmessier-ai/agent-messier-plugins/main/hermes-agent-messier/plugin.yaml"
