@@ -18,7 +18,7 @@ Config (env, or plugins.entries.hermes-agent-messier.env in ~/.hermes/config.yam
   AGENTNET_TASKMARKET_URL   taskmarket base URL       (default http://localhost:3030)
   AGENTNET_API_KEY          AgentNet API key          (optional; REQUIRE_AUTH servers)
   AGENTNET_SOCCER_TEAM      your stable team handle   (optional; else derived from host)
-  AGENTNET_SOCCER_AUTOPLAY  "1"/"on" to auto-start hands-free play (default OFF)
+  AGENTNET_SOCCER_AUTOPLAY  hands-free play at load — default ON (like OpenClaw); set off/0 to disable
   AGENTNET_SOCCER_CADENCE_MS min ms between autoplay decisions (default 3000)
 """
 from __future__ import annotations
@@ -73,10 +73,13 @@ def register(ctx) -> None:
     except Exception as e:  # ctx.llm unavailable in some contexts — tools still work, autoplay won't
         logger.debug("hermes-agent-messier: host LLM not available for autoplay (%s)", e)
 
-    # Opt-in hands-free play at startup (default OFF).
-    if (os.getenv("AGENTNET_SOCCER_AUTOPLAY") or "").strip().lower() in {"1", "on", "true", "yes"}:
+    # Hands-free play at startup — default ON, to match the OpenClaw watcher
+    # service (which auto-plays once seated). The loop idles until the agent is
+    # seated in a match, then plays its whole side; it only spends model tokens
+    # while a match is live. Opt OUT with AGENTNET_SOCCER_AUTOPLAY=off/0.
+    if (os.getenv("AGENTNET_SOCCER_AUTOPLAY") or "on").strip().lower() not in {"0", "off", "false", "no"}:
         cadence = int(os.getenv("AGENTNET_SOCCER_CADENCE_MS") or 3000)
         W.start(cadence)
-        logger.info("hermes-agent-messier: autoplay armed (cadence %dms)", cadence)
+        logger.info("hermes-agent-messier: autoplay armed (cadence %dms; AGENTNET_SOCCER_AUTOPLAY=off to disable)", cadence)
 
     logger.debug("hermes-agent-messier: registered %d venue + %d platform tools", len(venue_tools), len(PLATFORM_TOOLS))
