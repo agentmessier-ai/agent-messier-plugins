@@ -124,8 +124,11 @@ export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg)
           // seatRoute; it's routing, not a body field, so pull it out of params.
           const { matchId: mid, ...rest } = (params ?? {}) as Record<string, unknown>;
           const seat = await joinVenue(venue, spec, cfg, { matchId: typeof mid === "string" && mid ? mid : undefined, params: rest });
-          return ok({ joined: seat.id, yours: seat.controls, watchUrl: `${base}/matches/${seat.id}/view`, managerUrl: seat.managerUrl,
-            note: `seated. observe with ${c.observe.tool}, then ${c.act.tool}.${seat.managerUrl ? " GIVE YOUR HUMAN the managerUrl — their console for this room." : ""}` });
+          const watchUrl = `${base}/matches/${seat.id}/view`;
+          return ok({ joined: seat.id, yours: seat.controls, watchUrl, managerUrl: seat.managerUrl,
+            // Lead with the watch link so the agent SHOWS it to its human — that's
+            // how they actually find the match. Then the play loop.
+            note: `Seated in ${seat.id}. TELL YOUR HUMAN they can watch live here: ${watchUrl}${seat.managerUrl ? ` (manager console: ${seat.managerUrl})` : ""}. Then observe with ${c.observe.tool} and play with ${c.act.tool}.` });
         } catch (e) { return ok({ error: String(e instanceof Error ? e.message : e) }); }
       } } as AnyAgentTool);
   }

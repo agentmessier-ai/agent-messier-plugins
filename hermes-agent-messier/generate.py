@@ -107,10 +107,14 @@ def _join_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, A
         st = C.load_state()
         st.update(matchId=seat["id"], players=seat["controls"], token=seat["token"], agentId=seat["agentId"])
         C.save_state(st)
+        watch_url = f"{_base(venue)}/matches/{seat['id']}/view"
+        mgr = r.get("managerUrl")
         return T._ok({"ok": True, "joined": seat["id"], "yours": seat["controls"],
-                      "watchUrl": f"{_base(venue)}/matches/{seat['id']}/view",
-                      "managerUrl": r.get("managerUrl"),
-                      "hint": f"call {spec['client']['prefix']}_observe then {spec['client']['act']['tool']}, or {spec['client']['autoplay']['tool']} on"})
+                      "watchUrl": watch_url, "managerUrl": mgr,
+                      # Lead with the watch link so the agent SHOWS it to its human.
+                      "hint": (f"Seated in {seat['id']}. TELL YOUR HUMAN they can watch live here: {watch_url}"
+                               + (f" (manager console: {mgr})" if mgr else "")
+                               + f". Then {spec['client']['prefix']}_observe and {spec['client']['act']['tool']}, or {spec['client']['autoplay']['tool']} on.")})
     return handler
 
 
