@@ -25,7 +25,15 @@ DEFAULT_URL = "http://localhost:3010"
 
 
 def server_url() -> str:
-    return (os.getenv("AGENTNET_SOCCER_URL") or DEFAULT_URL).rstrip("/")
+    # Only trust a real http(s) URL. A shell rc / nix devShell / CI env can
+    # inject garbage (we've seen a stray script line land in AGENTNET_SOCCER_URL),
+    # and feeding that to urlopen throws "unknown url type". A non-URL value is
+    # treated as unset → the safe default, so a misconfigured env never wedges
+    # every tool. Real config (a proper URL) still flows through normally.
+    v = (os.getenv("AGENTNET_SOCCER_URL") or "").strip()
+    if not (v.startswith("http://") or v.startswith("https://")):
+        v = DEFAULT_URL
+    return v.rstrip("/")
 
 
 def accounts_url() -> str:

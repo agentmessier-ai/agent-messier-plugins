@@ -135,3 +135,12 @@ def test_leave_when_not_in_a_match_is_a_clean_error(monkeypatch):
     fake(monkeypatch, {})
     out = json.loads(tool("soccer_leave")({}))
     assert out["ok"] is False and "not in a match" in out["error"]
+
+
+def test_server_url_ignores_a_non_url_env_value(monkeypatch):
+    # A shell rc / nix env injected a stray script line — must NOT become the base
+    # URL (that throws "unknown url type" and wedges every tool). Fall back to default.
+    monkeypatch.setenv("AGENTNET_SOCCER_URL", 'if [ "$FOUND" = 0 ]; then')
+    assert client.server_url() == "http://localhost:3010"
+    monkeypatch.setenv("AGENTNET_SOCCER_URL", "https://pitch.example.com/")
+    assert client.server_url() == "https://pitch.example.com"  # a real URL still flows through
