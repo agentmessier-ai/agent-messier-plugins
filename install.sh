@@ -71,7 +71,14 @@ setup_openclaw(){
     return 0
   fi
   say "OpenClaw detected — installing $OC_PKG"
-  openclaw plugins install "$OC_PKG" >/dev/null 2>&1 || true
+  # `plugins install` is idempotent — it ensures the plugin is present but will
+  # NOT bump an already-installed copy. So upgrade explicitly when it's already
+  # there (mirrors the Hermes `--force` path); only `install` a fresh machine.
+  if [ -n "$(oc_version)" ]; then
+    openclaw plugins update "$OC_ID" >/dev/null 2>&1 || true
+  else
+    openclaw plugins install "$OC_PKG" >/dev/null 2>&1 || true
+  fi
   openclaw plugins enable "$OC_ID" >/dev/null 2>&1 || true
   openclaw config set "plugins.entries.$OC_ID.config.serverUrl" "$PITCH_URL" >/dev/null 2>&1 || true
   [ -n "${TEAM:-}" ] && openclaw config set "plugins.entries.$OC_ID.config.teamName" "$TEAM" >/dev/null 2>&1 || true
