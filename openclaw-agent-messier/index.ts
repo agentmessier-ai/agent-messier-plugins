@@ -3,7 +3,7 @@ import { memberTools, venuesTool, agentIdOf, identityOf, venueUrl, type PluginCf
 import { defaultVenueTools, defaultRealtimeVenue, joinVenue } from "./src/generate.js";
 import { startObserveWatcher } from "./src/watcher.js";
 import { session } from "./src/state.js";
-import { runAutoplayTurn, STRICT_JSON_DIRECTIVE } from "./src/decide.js";
+import { runAutoplayTurn, postDecisionReport, STRICT_JSON_DIRECTIVE } from "./src/decide.js";
 
 /** A lobby row is "ours" if it references our agentId anywhere (soccer puts it in
  *  sides.home/away; a generic venue may shape it differently). Deep, shape-blind. */
@@ -55,6 +55,10 @@ export default function register(api: OpenClawPluginApi) {
 
   let controller: AbortController | null = null;
   let poller: ReturnType<typeof setInterval> | null = null;
+  // The per-match session key currently in play. We persist ONE session per match
+  // (so the agent accumulates its own decision history); on LEAVING a match we
+  // delete it so a new match starts fresh and stale transcripts don't pile up.
+  let activeSessionKey: string | null = null;
 
   api.registerService({
     id: `agentnet-${venue.id}-watcher`,
@@ -75,11 +79,18 @@ export default function register(api: OpenClawPluginApi) {
 
         controller?.abort(); // leaving a previous room
         controller = new AbortController();
+        // Leaving the previous match → drop its persistent session so the new
+        // match starts with fresh context (and stale transcripts don't pile up).
+        if (sessionKey && activeSessionKey && activeSessionKey !== `${sessionKey}:${seat.id}`) {
+          api.runtime.subagent.deleteSession({ sessionKey: activeSessionKey }).catch(() => {});
+        }
+        // ONE persistent session for THIS match, stable across all its turns.
+        activeSessionKey = sessionKey ? `${sessionKey}:${seat.id}` : null;
         let move = 0;
         // Fire-and-forget: the watcher runs until aborted or the gateway stops.
         void startObserveWatcher(
           { serverUrl: cfg.serverUrl, matchId: seat.id!, agentId, mode: cfg.mode, strategyFile: cfg.strategyFile, actTool, label },
-          async ({ system, user }) => {
+          async ({ system, user, tick, clock }) => {
             if (!sessionKey) {
               ctx.logger.warn(`[${label}] no sessionKey configured; cannot deliver move prompts.`);
               return;
@@ -90,34 +101,58 @@ export default function register(api: OpenClawPluginApi) {
             // 2-decisions-in-157s). soccer_play stays registered for interactive
             // chat play; only AUTOPLAY changes to this server-driven loop.
             //
-            // Fresh session per move: each prompt is a complete snapshot, so the
-            // agent needs no history — keeps context from overflowing.
+            // ONE persistent session per MATCH (sessionKey:matchId, stable across
+            // turns) so the agent accumulates context — its own prior decisions —
+            // and the session transcript is the full per-match request log. `turn`
+            // is kept only for the idempotency key and the context-growth cap.
             const turn = move++;
+            const matchSessionKey = `${sessionKey}:${seat.id}`;
             const idempotencyKey = `agentnet:${venue.id}:${seat.id}:${agentId}:${turn}`;
+            const did = session.did ?? agentId;
+            const sys = system || undefined;
+            const msg = `${user}${STRICT_JSON_DIRECTIVE}`;
             // Mark when this prompt was handed to the agent: x-agent-decision-ms is
             // the prompt→reply latency measured inside runAutoplayTurn.
             session.promptDeliveredAt = Date.now();
             const result = await runAutoplayTurn({
               runtime: api.runtime,
-              sessionKey: `${sessionKey}:${turn}`,
+              sessionKey: matchSessionKey,
+              turn,
               idempotencyKey,
               // The static rulebook (spec.instructions.system) rides the SYSTEM
               // channel; the per-tick board is the user message. '' on the
               // fallback path → no extra system prompt.
-              extraSystemPrompt: system || undefined,
+              extraSystemPrompt: sys,
               // Steer the agent to reply with ONLY the moves JSON (no tool call).
-              message: `${user}${STRICT_JSON_DIRECTIVE}`,
+              message: msg,
               // 45s ceiling, matching the watcher's per-delivery watchdog backstop:
               // a run that hasn't produced a decision by then is treated as stalled
               // (was 300s, which let one hung run silence the team for 5 min — m171).
               timeoutMs: 45_000,
               matchId: seat.id!,
               cfg,
-              did: session.did ?? agentId,
+              did,
               token: session.token,
               base,
               logger: ctx.logger,
             });
+            // Report EVERY decision to the pitch — acted AND no-response — so the
+            // decision inspector sees no-response turns too. Best-effort, off the
+            // hot path, never throws.
+            void postDecisionReport(
+              {
+                tick,
+                clock,
+                prompt: { ...(sys ? { system: sys } : {}), user: msg },
+                outcome: result.outcome,
+                ...(result.reason ? { reason: result.reason } : {}),
+                ...(result.moves ? { moves: result.moves } : {}),
+                rawText: result.rawText,
+                latencyMs: result.latencyMs,
+                ...(session.lastModel ? { model: session.lastModel } : {}),
+              },
+              { base, matchId: seat.id!, agentId: did, token: session.token, logger: ctx.logger },
+            );
             // act-verification by the natural signal: did we parse+post (or did the
             // model act via the tool)? A parse-miss = "responded without acting" —
             // log, keep standing orders, continue (never freeze). The watcher's own
@@ -186,6 +221,10 @@ export default function register(api: OpenClawPluginApi) {
       if (poller) { clearInterval(poller); poller = null; }
       controller?.abort();
       controller = null;
+      if (activeSessionKey) {
+        api.runtime.subagent.deleteSession({ sessionKey: activeSessionKey }).catch(() => {});
+        activeSessionKey = null;
+      }
       session.joinAndWatch = null;
       session.matchId = null;
     },

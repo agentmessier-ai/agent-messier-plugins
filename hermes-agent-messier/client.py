@@ -35,6 +35,11 @@ def set_last_model(model: Optional[str]) -> None:
         _LAST_MODEL = str(model)[:80]
 
 
+def last_model() -> Optional[str]:
+    """The effective LLM (provider/model) of the most recent decision, or None."""
+    return _LAST_MODEL
+
+
 def server_url() -> str:
     # Only trust a real http(s) URL. A shell rc / nix devShell / CI env can
     # inject garbage (we've seen a stray script line land in AGENTNET_SOCCER_URL),
@@ -216,3 +221,19 @@ def request(method: str, path: str, body: Optional[dict] = None, *, seat_token: 
         raise PitchError(0, f"cannot reach pitch at {server_url()}: {exc.reason}") from None
     except socket.timeout:
         raise PitchError(0, f"pitch request timed out ({server_url()})") from None
+
+
+# ── decision observability (Change 2) ────────────────────────────────────────
+def report_decision(match_id: str, agent_id: str, report: Dict[str, Any], *,
+                    seat_token: Optional[str] = None) -> None:
+    """Best-effort POST of a per-decision report to the pitch
+    (POST /matches/:id/agents/:agentId/decision). Authed exactly like the action
+    POST (x-agent-token seat token / AGENTNET_API_KEY bearer). Fired for BOTH
+    acted and no_response turns; a failure here must never break the play loop."""
+    if not (match_id and agent_id and isinstance(report, dict)):
+        return
+    path = f"/matches/{match_id}/agents/{agent_id}/decision"
+    try:
+        request("POST", path, report, seat_token=seat_token)
+    except PitchError:
+        pass  # observability is non-essential — a dropped report never stops play

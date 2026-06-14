@@ -155,6 +155,7 @@ def _loop(cadence_ms: int) -> None:
             phase = view.get("phase")
             if phase == "ended":
                 _log("[autoplay] match ended — pausing (no decisions)")
+                D._reset_history()  # clear the per-match notebook on match end (Change 3)
                 _stop.wait(3.0)
                 continue
             # A waiting room ticks only once both sides are filled; no point deciding.
@@ -162,9 +163,20 @@ def _loop(cadence_ms: int) -> None:
                 _stop.wait(cadence_ms / 1000.0)
                 continue
 
+            # The view may omit matchId; stamp it so decide can key its per-match
+            # memory + report (Change 2/3) off the loop's authoritative matchId.
+            view.setdefault("matchId", match_id)
             moves = D.decide(view, _complete, spec, _complete_structured) if _complete else []
             for pid, action, say, params in moves:
                 _post_move(match_id, pid, action, say, token, params, spec=spec, did=agent_id)
+            # Report EVERY decision (acted or no_response) — best-effort (Change 2).
+            if _complete:
+                try:
+                    report = D.last_report()
+                    if report:
+                        C.report_decision(match_id, agent_id, report, seat_token=token)
+                except Exception:
+                    pass  # observability must never break the loop
             _status.update(lastDecision=time.time(), moves=_status["moves"] + len(moves), matchId=match_id)
             if moves:
                 _log(f"[autoplay] {len(moves)} moves in {match_id}")

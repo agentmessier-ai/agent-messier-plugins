@@ -104,8 +104,10 @@ export function parseSseBlock(block: string): { event?: string; data?: string } 
  *  - `system`: the STATIC game rules (spec.instructions.system) — passed as
  *    subagent.run's extraSystemPrompt. Empty on the fallback path (no spec).
  *  - `user`: the PER-TICK board — strategy + rendered situation + play guidance
- *    + the act/JSON directive. This is what changes every tick. */
-export type DeliverPrompt = { system: string; user: string };
+ *    + the act/JSON directive. This is what changes every tick.
+ *  - `tick`/`clock`: the delivered frame's game time, threaded through so the
+ *    deliver callback can stamp the per-turn decision report. */
+export type DeliverPrompt = { system: string; user: string; tick: number; clock: number };
 
 const actDirective = (actTool: string) =>
   `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
@@ -129,6 +131,8 @@ export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advan
         `${v.summary}\n\n` +
         `${ins.play}\n\n` +
         actDirective(actTool),
+      tick: v.tick,
+      clock: v.clock,
     };
   }
   // Fallback (pre-envelope server or handshake not yet arrived). describeTeam is
@@ -139,6 +143,8 @@ export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advan
   return {
     system: "",
     user: stratBlock + `${rendered}\n\n` + actDirective(actTool),
+    tick: v.tick,
+    clock: v.clock,
   };
 }
 

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import time
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from . import client as C
 
@@ -40,6 +42,81 @@ FALLBACK_INSTRUCTIONS = {
 }
 
 Move = Tuple[str, str, str, Dict[str, Any]]  # (player_id, action, say, params)
+
+
+# ── per-match memory: a bounded rolling history (the "manager's notebook") ────
+# Hermes `complete`/`complete_structured` are STATELESS, so to give the agent
+# continuity across ticks we emulate "one session per match": a small ring of
+# the last few turns (a short board summary + the orders it issued), injected
+# into the next prompt. Keyed by matchId so a new game starts clean; capped in
+# count (last N turns) AND in total injected length so it never bloats the
+# prompt. Venue-agnostic — it carries only generic "here were your last orders",
+# no game-specifics. Graceful: if anything is missing we just skip the block.
+_HISTORY_TURNS = 3          # ring depth: remember the last N decisions
+_HISTORY_CHARS = 600        # hard cap on the injected block's length
+_history: Deque[Dict[str, str]] = deque(maxlen=_HISTORY_TURNS)
+_history_match: Optional[str] = None
+
+
+def _reset_history(match_id: Optional[str] = None) -> None:
+    """Start a fresh notebook for a new match (or clear on match end)."""
+    global _history, _history_match
+    _history = deque(maxlen=_HISTORY_TURNS)
+    _history_match = match_id
+
+
+def _match_id_of(view: Dict[str, Any]) -> Optional[str]:
+    return view.get("matchId") or view.get("match", {}).get("id") if isinstance(view, dict) else None
+
+
+def _sync_history_match(view: Dict[str, Any]) -> None:
+    """Reset the notebook when the matchId changes (new game → clean slate). A
+    None matchId (view without one) leaves the current notebook untouched."""
+    mid = _match_id_of(view)
+    if mid is not None and mid != _history_match:
+        _reset_history(mid)
+
+
+def _summarize_moves(moves: List[Move]) -> str:
+    """A compact one-line digest of the orders issued (player→action[zone])."""
+    if not moves:
+        return "(no orders)"
+    bits = []
+    for pid, action, _say, params in moves:
+        zone = params.get("zone") if isinstance(params, dict) else None
+        bits.append(f"{pid}:{action}" + (f"@{zone}" if zone else ""))
+    return ", ".join(bits)
+
+
+def _board_brief(view: Dict[str, Any]) -> str:
+    """A tiny, venue-neutral snapshot of the board for the notebook entry —
+    score + possession when present; falls back to the head of the summary."""
+    score = view.get("score") if isinstance(view, dict) else None
+    if isinstance(score, dict) and ("home" in score or "away" in score):
+        return f"score {score.get('home', 0)}-{score.get('away', 0)}"
+    summary = (view.get("summary") or "") if isinstance(view, dict) else ""
+    return summary.strip().splitlines()[0][:80] if summary else "(board)"
+
+
+def _record_turn(view: Dict[str, Any], moves: List[Move]) -> None:
+    """Append this turn (brief board + the orders issued) to the notebook."""
+    try:
+        _history.append({"board": _board_brief(view), "orders": _summarize_moves(moves)})
+    except Exception:
+        pass  # the notebook is best-effort — never break a decision over it
+
+
+def _history_block() -> str:
+    """The compact 'Recent decisions' prompt block (length-capped), or '' when
+    the notebook is empty / unavailable. Oldest-first so the latest is last."""
+    try:
+        if not _history:
+            return ""
+        lines = [f"- {t['board']} → {t['orders']}" for t in _history]
+        block = "## Recent decisions (your last few orders)\n" + "\n".join(lines)
+        return block[:_HISTORY_CHARS]
+    except Exception:
+        return ""
 
 
 def _fmt_player(p: Dict[str, Any]) -> str:
@@ -88,9 +165,11 @@ def build_messages(view: Dict[str, Any], spec: Optional[Dict[str, Any]] = None) 
     situation = view.get("summary") or _render_fallback(view)
     standing = C.strategy()
     strat_block = (f"## Your manager's standing instructions\n{standing}\n\n" if standing else "")
+    recent = _history_block()
+    recent_block = (recent + "\n\n" if recent else "")
     return [
         {"role": "system", "content": ins["system"]},
-        {"role": "user", "content": strat_block + situation + "\n\n" + ins["play"] + "\n\n" + ins["output"]},
+        {"role": "user", "content": strat_block + recent_block + situation + "\n\n" + ins["play"] + "\n\n" + ins["output"]},
     ]
 
 
@@ -183,18 +262,21 @@ CompleteStructured = Callable[..., StructuredResult]
 
 
 def _decide_structured(view: Dict[str, Any], complete_structured: CompleteStructured,
-                       my_ids: List[str], spec: Optional[Dict[str, Any]] = None) -> Optional[List[Move]]:
+                       my_ids: List[str], spec: Optional[Dict[str, Any]] = None,
+                       ) -> Optional[Tuple[List[Move], str]]:
     """Structured decision path: ask the host to ENFORCE JSON (json_schema /
     json_mode), removing the reasoning-model 'empty/prose-wrapped JSON' parse
-    fragility. Returns the validated moves, or None to signal 'structured path
-    unusable — fall back' (host raised, trust-gated, or schema rejected). An
-    empty list (valid call, no usable moves) is returned as [] (not None)."""
+    fragility. Returns (validated moves, raw reply text), or None to signal
+    'structured path unusable — fall back' (host raised, trust-gated, or schema
+    rejected). An empty list (valid call, no usable moves) is returned as []."""
     situation = view.get("summary") or _render_fallback(view)
+    recent = _history_block()
+    input_text = (recent + "\n\n" + situation) if recent else situation
     ins = _instructions(spec)
     try:
         result = complete_structured(
             instructions=_structured_instructions(view, spec),
-            input=[{"type": "text", "text": situation}],
+            input=[{"type": "text", "text": input_text}],
             json_schema=_moves_schema(view, spec),
             schema_name="soccer_moves",
             system_prompt=ins["system"],
@@ -203,12 +285,56 @@ def _decide_structured(view: Dict[str, Any], complete_structured: CompleteStruct
         )
     except Exception:
         return None  # trust-gated / unsupported / transport — let caller fall back
+    raw = getattr(result, "text", "") or ""
     parsed = getattr(result, "parsed", None)
     if isinstance(parsed, (dict, list)):
-        return parse_moves_obj(parsed, my_ids, spec)
+        if not raw:
+            raw = json.dumps(parsed)  # surface the parsed object as the raw reply
+        return parse_moves_obj(parsed, my_ids, spec), raw
     # Host returned text (json_mode off, schema rejected, or model refused) —
     # tolerantly parse the raw completion rather than dropping the turn.
-    return parse_moves(getattr(result, "text", "") or "", my_ids, spec)
+    return parse_moves(raw, my_ids, spec), raw
+
+
+# ── the per-decision report (Change 2: report every decision to the pitch) ────
+# `decide` builds this from what it already has; the watcher reads `last_report()`
+# and POSTs it to /matches/:id/agents/:agentId/decision (acted AND no_response).
+_last_report: Optional[Dict[str, Any]] = None
+
+
+def last_report() -> Optional[Dict[str, Any]]:
+    return _last_report
+
+
+def _build_report(view: Dict[str, Any], spec: Optional[Dict[str, Any]],
+                  moves: List[Move], raw_text: str, latency_ms: int,
+                  prompt_user: str, prompt_system: str) -> Dict[str, Any]:
+    """Assemble the decision report wire body. outcome=acted when moves非空 else
+    no_response (with a reason). moves are reshaped to the report contract
+    {playerId, action, zone?, say?} — zone is lifted out of the passthrough
+    params. Best-effort fields (rawText/latency/model) ride along."""
+    acted = bool(moves)
+    out_moves = []
+    for pid, action, say, params in moves:
+        m: Dict[str, Any] = {"playerId": pid, "action": action}
+        if isinstance(params, dict) and params.get("zone") is not None:
+            m["zone"] = params["zone"]
+        if say:
+            m["say"] = say
+        out_moves.append(m)
+    report: Dict[str, Any] = {
+        "tick": view.get("tick", 0),
+        "clock": view.get("clock", 0),
+        "prompt": {"system": prompt_system, "user": prompt_user},
+        "outcome": "acted" if acted else "no_response",
+        "moves": out_moves,
+        "rawText": raw_text,
+        "latencyMs": latency_ms,
+        "model": C.last_model(),
+    }
+    if not acted:
+        report["reason"] = "empty reply" if not (raw_text or "").strip() else "no valid moves parsed"
+    return report
 
 
 def decide(view: Dict[str, Any], complete: Callable[[List[Dict[str, str]]], str],
@@ -218,16 +344,46 @@ def decide(view: Dict[str, Any], complete: Callable[[List[Dict[str, str]]], str]
     (`complete_structured`, host-enforced JSON) when available; falls back to the
     free-text `complete` + tolerant `parse_moves` for old hosts, trust-gated
     structured access, or a rejected schema. Degraded, never dead. Returns [] on
-    any failure (the watcher just retries next tick)."""
+    any failure (the watcher just retries next tick).
+
+    Side effects (per-match memory + observability): resets the rolling history
+    on a matchId change, injects it into the prompt (via build_messages /
+    structured input), records this turn into it, and builds a decision report
+    (acted OR no_response) the watcher reads via `last_report()`."""
+    global _last_report
+    _last_report = None
     my_ids = [p["id"] for p in view.get("mine", [])]
     if not my_ids:
         return []
+    _sync_history_match(view)  # new match → fresh notebook (Change 3)
+
+    ins = _instructions(spec)
+    prompt_system = ins["system"]
+    moves: List[Move] = []
+    raw_text = ""
+    started = time.monotonic()
+
+    structured_ok = False
     if complete_structured is not None:
-        moves = _decide_structured(view, complete_structured, my_ids, spec)
-        if moves is not None:
-            return moves  # structured call succeeded (even if it yielded no moves)
+        result = _decide_structured(view, complete_structured, my_ids, spec)
+        if result is not None:
+            moves, raw_text = result  # structured succeeded (even if no moves)
+            structured_ok = True
+    if not structured_ok:
+        # text path: no structured adapter, or structured raised / was unusable
+        try:
+            msgs = build_messages(view, spec)
+            raw_text = complete(msgs) or ""
+            moves = parse_moves(raw_text, my_ids, spec)
+        except Exception:
+            raw_text = raw_text or ""
+            moves = []
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    prompt_user = build_messages(view, spec)[1]["content"]
     try:
-        text = complete(build_messages(view, spec))
+        _last_report = _build_report(view, spec, moves, raw_text, latency_ms, prompt_user, prompt_system)
     except Exception:
-        return []
-    return parse_moves(text or "", my_ids, spec)
+        _last_report = None
+    _record_turn(view, moves)  # append this turn to the notebook (Change 3)
+    return moves

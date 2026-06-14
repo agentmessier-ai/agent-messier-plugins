@@ -203,8 +203,10 @@ function blockText(content: unknown): string {
 }
 
 /** The text of the LAST assistant message in a getSessionMessages transcript.
- *  A fresh per-turn session yields one user + one assistant record, so this is
- *  trivially that assistant reply. Returns "" when there is no assistant text. */
+ *  With a PERSISTENT per-match session the transcript GROWS across turns
+ *  (user/assistant pairs accumulate), so we scan from the end and return the
+ *  most recent assistant reply — never an earlier turn's. Returns "" when there
+ *  is no assistant text. */
 export function lastAssistantText(messages: unknown[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i];
@@ -270,11 +272,70 @@ export async function executeMoves(
   return { posted: results.length, results };
 }
 
+// ── decision reporting: POST every turn's decision to the pitch ──────────────
+
+export type DecisionReportDeps = {
+  base: string;
+  matchId: string;
+  /** Reporting agentId (session.did ?? agentId). */
+  agentId: string;
+  /** Seat token — sent as x-agent-token (same auth as executeMoves). */
+  token?: string | null | undefined;
+  fetch?: typeof fetch;
+  logger?: { warn: (m: string) => void };
+};
+
+export type DecisionReport = {
+  tick: number;
+  clock: number;
+  prompt: { system?: string; user: string };
+  outcome: "acted" | "no_response";
+  reason?: string;
+  moves?: Move[];
+  rawText?: string;
+  latencyMs?: number;
+  model?: string;
+};
+
+/**
+ * POST a decision report to `/matches/:id/agents/:agentId/decision` so EVERY
+ * turn — acted AND no-response — reaches the pitch's decision inspector. Auth is
+ * the seat token (x-agent-token), same as executeMoves. Best-effort and off the
+ * hot path: it NEVER throws (caller fires it `.catch`-free via this swallow) so a
+ * reporting failure can't disrupt play.
+ */
+export async function postDecisionReport(report: DecisionReport, deps: DecisionReportDeps): Promise<void> {
+  const f = deps.fetch ?? fetch;
+  const base = deps.base.replace(/\/$/, "");
+  const url = `${base}/matches/${encodeURIComponent(deps.matchId)}/agents/${encodeURIComponent(deps.agentId)}/decision`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (deps.token) headers["x-agent-token"] = deps.token;
+  try {
+    await f(url, { method: "POST", headers, body: JSON.stringify(report) });
+  } catch (e) {
+    deps.logger?.warn(`decision report POST failed: ${String(e)}`);
+  }
+}
+
 // ── the full autoplay turn: run → wait → read → parse → post ─────────────────
+
+/** Context-growth safety cap. A persistent per-match session accumulates the
+ *  agent's whole decision history (good: it remembers its own prior orders), but
+ *  a long match would otherwise grow the transcript without bound. OpenClaw
+ *  auto-compacts, but as a hard backstop we RESET the session (deleteSession +
+ *  start fresh) once a single match exceeds this many turns. Tradeoff: the agent
+ *  loses its accumulated in-match memory at the reset boundary, but context can
+ *  never grow unbounded. Keep it generous enough that most matches never hit it. */
+export const SESSION_RESET_TURN_CAP = 60;
 
 export type AutoplayTurnDeps = {
   runtime: PluginRuntime;
+  /** Stable PER-MATCH session key — persists across turns so the agent
+   *  accumulates context (its own prior decisions) and the transcript is the
+   *  full per-match request log. Reset only on leave/new-match/cap. */
   sessionKey: string;
+  /** This match's turn ordinal (0-based). Used for the reset cap only. */
+  turn: number;
   idempotencyKey: string;
   /** The strict-JSON move prompt (the per-tick board) to deliver to the agent. */
   message: string;
@@ -291,10 +352,29 @@ export type AutoplayTurnDeps = {
   logger?: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 };
 
-export type AutoplayTurnResult =
-  | { acted: true; via: "post"; posted: number }
-  | { acted: true; via: "tool" }                 // the model called soccer_play itself
-  | { acted: false; reason: string };            // responded without acting (parse miss / empty reply)
+/** Everything a decision REPORT needs, returned alongside the act outcome so the
+ *  caller (index.ts) can POST one /decision report per turn — for acted AND
+ *  no-response turns — using the tick/clock it has from the delivered frame. */
+export type AutoplayTurnObservability = {
+  /** "acted" when the team was moved this cycle (direct post OR the model's own
+   *  tool call); "no_response" when the run finished without a usable decision. */
+  outcome: "acted" | "no_response";
+  /** No-act reason (parse miss / empty reply); undefined when acted. */
+  reason?: string;
+  /** The agent's raw reply text (last assistant message), "" if unreadable. */
+  rawText: string;
+  /** Parsed moves (present only when we parsed + posted; undefined on tool/miss). */
+  moves?: Move[];
+  /** Measured prompt→reply latency (ms). */
+  latencyMs: number;
+};
+
+export type AutoplayTurnResult = AutoplayTurnObservability &
+  (
+    | { acted: true; via: "post"; posted: number }
+    | { acted: true; via: "tool" }                 // the model called soccer_play itself
+    | { acted: false }                             // responded without acting (parse miss / empty reply)
+  );
 
 /**
  * Force exactly one agent turn for a delivered situation and act on its reply.
@@ -306,6 +386,15 @@ export async function runAutoplayTurn(deps: AutoplayTurnDeps): Promise<AutoplayT
   // act-verification baseline: if soccer_play runs during this turn it advances
   // session.lastActAt past this — our cue to NOT double-post.
   const actAtBefore = session.lastActAt;
+
+  // Context-growth backstop: once a single match's persistent session exceeds the
+  // cap, drop it so the next run starts fresh — bounds transcript size at the
+  // cost of the agent's accumulated in-match memory (see SESSION_RESET_TURN_CAP).
+  if (deps.turn > 0 && deps.turn % SESSION_RESET_TURN_CAP === 0) {
+    await runtime.subagent.deleteSession({ sessionKey: deps.sessionKey }).catch(() => {});
+    deps.logger?.info(`session reset at turn ${deps.turn} (cap ${SESSION_RESET_TURN_CAP}) — context bounded`);
+  }
+
   const startedAt = Date.now();
 
   const { runId } = await runtime.subagent.run({
@@ -319,28 +408,36 @@ export async function runAutoplayTurn(deps: AutoplayTurnDeps): Promise<AutoplayT
   const decisionMs = Math.max(0, Date.now() - startedAt);
 
   // The model called the act tool itself (it POSTed + stamped lastActAt). Treat
-  // the cycle as acted; do NOT parse+post again (would double-apply).
+  // the cycle as acted; do NOT parse+post again (would double-apply). The
+  // session PERSISTS — no deleteSession here; it's the per-match request log.
   if (session.lastActAt !== actAtBefore) {
-    return { acted: true, via: "tool" };
+    return { acted: true, via: "tool", outcome: "acted", rawText: "", latencyMs: decisionMs };
   }
 
   let text = "";
   try {
+    // The persistent transcript GROWS each turn; we read the most recent slice
+    // and lastAssistantText returns the LATEST assistant reply (not an old one).
     const { messages } = await runtime.subagent.getSessionMessages({ sessionKey: deps.sessionKey, limit: 10 });
     text = lastAssistantText(messages);
   } catch (e) {
     deps.logger?.warn(`getSessionMessages failed: ${String(e)}`);
-  } finally {
-    // Fresh session per turn → drop it so transcripts don't accumulate. Cleanup
-    // failure is non-fatal (the run already happened).
-    runtime.subagent.deleteSession({ sessionKey: deps.sessionKey }).catch(() => {});
   }
+  // NOTE: no per-turn deleteSession — the session persists for the whole match so
+  // the agent accumulates its own decision history. Reset happens only on
+  // leave/new-match (index.ts) or the turn cap above.
 
   let moves: Move[];
   try {
     moves = parseMoves(text);
   } catch (e) {
-    return { acted: false, reason: e instanceof DecideError ? e.message : String(e) };
+    return {
+      acted: false,
+      outcome: "no_response",
+      reason: e instanceof DecideError ? e.message : String(e),
+      rawText: text,
+      latencyMs: decisionMs,
+    };
   }
 
   const { posted } = await executeMoves(deps.matchId, moves, {
@@ -350,5 +447,5 @@ export async function runAutoplayTurn(deps: AutoplayTurnDeps): Promise<AutoplayT
     token: deps.token,
     decisionMs,
   });
-  return { acted: true, via: "post", posted };
+  return { acted: true, via: "post", posted, outcome: "acted", rawText: text, moves, latencyMs: decisionMs };
 }
