@@ -100,36 +100,46 @@ export function parseSseBlock(block: string): { event?: string; data?: string } 
   return event !== undefined ? { event, ...(data !== undefined ? { data } : {}) } : (data !== undefined ? { data } : {});
 }
 
-export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advanced" | "both", strategyFile?: string, spec?: GameSpec | null, actTool = "soccer_play"): string {
+/** A delivered turn, split so the rulebook can ride the model's SYSTEM channel.
+ *  - `system`: the STATIC game rules (spec.instructions.system) — passed as
+ *    subagent.run's extraSystemPrompt. Empty on the fallback path (no spec).
+ *  - `user`: the PER-TICK board — strategy + rendered situation + play guidance
+ *    + the act/JSON directive. This is what changes every tick. */
+export type DeliverPrompt = { system: string; user: string };
+
+const actDirective = (actTool: string) =>
+  `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
+  `every time you are prompted, even if the plan is unchanged. The order holds until you change it, ` +
+  `so if you go quiet your team freezes on stale orders. Never reply without acting.`;
+
+export function prompt(v: TeamView & { summary?: string }, mode: "easy" | "advanced" | "both", strategyFile?: string, spec?: GameSpec | null, actTool = "soccer_play"): DeliverPrompt {
   const standing = strategyText(strategyFile);
   const stratBlock = standing ? `## Your manager's standing instructions\n${standing}\n\n` : "";
   const ins = spec?.instructions;
   if (ins && ins.system && ins.play && v.summary) {
     // Generic GSP path: the server authored the instructions AND rendered the
-    // situation — the plugin only concatenates. Tool-calling host, so the
-    // direct-JSON `output` contract is replaced by a generic tool-act line
-    // (host concern, not game knowledge).
-    return (
-      `${ins.system}\n\n` +
-      stratBlock +
-      `${v.summary}\n\n` +
-      `${ins.play}\n\n` +
-      `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
-      `every time you are prompted, even if the plan is unchanged. The order holds until you change it, ` +
-      `so if you go quiet your team freezes on stale orders. Never reply without acting.`
-    );
+    // situation. The rulebook (static) rides the SYSTEM channel; the board
+    // (per-tick) is the user message. Tool-calling host, so the direct-JSON
+    // `output` contract is replaced by a generic tool-act line (host concern,
+    // not game knowledge).
+    return {
+      system: ins.system,
+      user:
+        stratBlock +
+        `${v.summary}\n\n` +
+        `${ins.play}\n\n` +
+        actDirective(actTool),
+    };
   }
   // Fallback (pre-envelope server or handshake not yet arrived). describeTeam is
   // the soccer-specific renderer — only valid for a TeamView; for any other
   // venue with no server instructions, dump the raw view rather than crash.
+  // No server-authored rulebook here, so the system channel is empty.
   const rendered = Array.isArray(v.mine) ? describeTeam(v, mode) : JSON.stringify(v);
-  return (
-    stratBlock +
-    `${rendered}\n\n` +
-    `Decide and act NOW: make ONE ${actTool} call with a move for every player you control — ` +
-    `every time you are prompted, even if the plan is unchanged. The order holds until you change it, ` +
-    `so if you go quiet your team freezes on stale orders. Never reply without acting.`
-  );
+  return {
+    system: "",
+    user: stratBlock + `${rendered}\n\n` + actDirective(actTool),
+  };
 }
 
 /** The observe path for a venue, from spec.routes ({matchId}/{did} substituted),
@@ -143,7 +153,7 @@ export function observeUrl(spec: GameSpec | null, matchId: string, did: string):
 
 export async function startObserveWatcher(
   cfg: WatcherCfg,
-  deliver: (msg: string) => void | Promise<void>,
+  deliver: (p: DeliverPrompt) => void | Promise<void>,
   options: WatcherOptions = {},
 ): Promise<void> {
   const { signal, logger } = options;

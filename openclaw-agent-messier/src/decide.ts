@@ -35,7 +35,9 @@ export type Move = {
   type: string;
   dir?: Vec2;
   power?: number;
-  zone?: number;
+  /** Zone is now a NAME (e.g. "att-left"); an integer is accepted for back-compat
+   *  and forwarded as-is (the server normalizes name→id). */
+  zone?: string | number;
   say?: string;
 };
 
@@ -60,10 +62,11 @@ export class DecideError extends Error {
 export const STRICT_JSON_DIRECTIVE =
   `\n\nDo NOT call any tool. Reply with ONLY a JSON object — no prose, no markdown ` +
   `fences — in exactly this shape, one entry per player you control:\n` +
-  `{"moves":[{"playerId":"<id>","type":"<action>","dir":{"x":1,"y":0},"power":0.8,"zone":11,"say":"optional"}]}\n` +
+  `{"moves":[{"playerId":"<id>","type":"<action>","dir":{"x":1,"y":0},"power":0.8,"zone":"att-left","say":"optional"}]}\n` +
   `Valid action types: ${ACTION_TYPES.join(", ")}. ` +
-  `"run"/"kick" need dir {x,y}; "kick" also needs power 0..1; "push" needs zone 1..12; ` +
-  `"press"/"cover" may add zone 1..12. Omit fields an action does not need. Return the moves JSON now.`;
+  `"run"/"kick" need dir {x,y}; "kick" also needs power 0..1; "push" needs a zone NAME; ` +
+  `"press"/"cover" may add a zone NAME. Use the zone names from the board. ` +
+  `Omit fields an action does not need. Return the moves JSON now.`;
 
 // ── tolerant JSON extraction (ported from driver.ts) ─────────────────────────
 
@@ -167,7 +170,11 @@ export function parseMoves(text: string): Move[] {
     const dir = coerceDir(r.dir);
     if (dir) move.dir = dir;
     if (typeof r.power === "number" && Number.isFinite(r.power)) move.power = r.power;
-    if (Number.isInteger(r.zone) && (r.zone as number) >= 1 && (r.zone as number) <= 12) move.zone = r.zone as number;
+    // Zones are now NAMES (e.g. "att-left"); accept a non-empty string and pass
+    // it through verbatim (the server is the authority — no client-side name
+    // validation). Still accept an integer for back-compat. Anything else drops.
+    if (typeof r.zone === "string" && r.zone.trim() !== "") move.zone = r.zone;
+    else if (Number.isInteger(r.zone)) move.zone = r.zone as number;
     if (typeof r.say === "string") move.say = r.say;
     moves.push(move);
   }
@@ -269,8 +276,11 @@ export type AutoplayTurnDeps = {
   runtime: PluginRuntime;
   sessionKey: string;
   idempotencyKey: string;
-  /** The strict-JSON move prompt to deliver to the agent. */
+  /** The strict-JSON move prompt (the per-tick board) to deliver to the agent. */
   message: string;
+  /** The static game rulebook (spec.instructions.system), delivered on the run's
+   *  SYSTEM channel rather than concatenated into the per-tick board. */
+  extraSystemPrompt?: string;
   /** Backstop ceiling for waitForRun (the watcher watchdog is the latch backstop). */
   timeoutMs: number;
   matchId: string;
@@ -301,6 +311,7 @@ export async function runAutoplayTurn(deps: AutoplayTurnDeps): Promise<AutoplayT
   const { runId } = await runtime.subagent.run({
     sessionKey: deps.sessionKey,
     message: deps.message,
+    ...(deps.extraSystemPrompt ? { extraSystemPrompt: deps.extraSystemPrompt } : {}),
     deliver: false,
     idempotencyKey: deps.idempotencyKey,
   });

@@ -79,7 +79,7 @@ export default function register(api: OpenClawPluginApi) {
         // Fire-and-forget: the watcher runs until aborted or the gateway stops.
         void startObserveWatcher(
           { serverUrl: cfg.serverUrl, matchId: seat.id!, agentId, mode: cfg.mode, strategyFile: cfg.strategyFile, actTool, label },
-          async (msg) => {
+          async ({ system, user }) => {
             if (!sessionKey) {
               ctx.logger.warn(`[${label}] no sessionKey configured; cannot deliver move prompts.`);
               return;
@@ -101,8 +101,12 @@ export default function register(api: OpenClawPluginApi) {
               runtime: api.runtime,
               sessionKey: `${sessionKey}:${turn}`,
               idempotencyKey,
+              // The static rulebook (spec.instructions.system) rides the SYSTEM
+              // channel; the per-tick board is the user message. '' on the
+              // fallback path → no extra system prompt.
+              extraSystemPrompt: system || undefined,
               // Steer the agent to reply with ONLY the moves JSON (no tool call).
-              message: `${msg}${STRICT_JSON_DIRECTIVE}`,
+              message: `${user}${STRICT_JSON_DIRECTIVE}`,
               // 45s ceiling, matching the watcher's per-delivery watchdog backstop:
               // a run that hasn't produced a decision by then is treated as stalled
               // (was 300s, which let one hung run silence the team for 5 min — m171).
