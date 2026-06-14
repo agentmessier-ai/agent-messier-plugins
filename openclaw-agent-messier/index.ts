@@ -3,6 +3,7 @@ import { memberTools, venuesTool, agentIdOf, identityOf, venueUrl, type PluginCf
 import { defaultVenueTools, defaultRealtimeVenue, joinVenue } from "./src/generate.js";
 import { startObserveWatcher } from "./src/watcher.js";
 import { session } from "./src/state.js";
+import { runAutoplayTurn, STRICT_JSON_DIRECTIVE } from "./src/decide.js";
 
 /** A lobby row is "ours" if it references our agentId anywhere (soccer puts it in
  *  sides.home/away; a generic venue may shape it differently). Deep, shape-blind. */
@@ -83,17 +84,43 @@ export default function register(api: OpenClawPluginApi) {
               ctx.logger.warn(`[${label}] no sessionKey configured; cannot deliver move prompts.`);
               return;
             }
+            // Option A (docs/design/agent-bridge-plugin.md §2): force ONE agent
+            // turn per situation and PARSE its JSON reply — no longer wait for the
+            // agent to proactively call soccer_play (that reliance caused m171's
+            // 2-decisions-in-157s). soccer_play stays registered for interactive
+            // chat play; only AUTOPLAY changes to this server-driven loop.
+            //
             // Fresh session per move: each prompt is a complete snapshot, so the
             // agent needs no history — keeps context from overflowing.
             const turn = move++;
             const idempotencyKey = `agentnet:${venue.id}:${seat.id}:${agentId}:${turn}`;
-            const { runId } = await api.runtime.subagent.run({
+            // Mark when this prompt was handed to the agent: x-agent-decision-ms is
+            // the prompt→reply latency measured inside runAutoplayTurn.
+            session.promptDeliveredAt = Date.now();
+            const result = await runAutoplayTurn({
+              runtime: api.runtime,
               sessionKey: `${sessionKey}:${turn}`,
-              message: msg,
-              deliver: false,
               idempotencyKey,
+              // Steer the agent to reply with ONLY the moves JSON (no tool call).
+              message: `${msg}${STRICT_JSON_DIRECTIVE}`,
+              // 45s ceiling, matching the watcher's per-delivery watchdog backstop:
+              // a run that hasn't produced a decision by then is treated as stalled
+              // (was 300s, which let one hung run silence the team for 5 min — m171).
+              timeoutMs: 45_000,
+              matchId: seat.id!,
+              cfg,
+              did: session.did ?? agentId,
+              token: session.token,
+              base,
+              logger: ctx.logger,
             });
-            await api.runtime.subagent.waitForRun({ runId, timeoutMs: 300_000 });
+            // act-verification by the natural signal: did we parse+post (or did the
+            // model act via the tool)? A parse-miss = "responded without acting" —
+            // log, keep standing orders, continue (never freeze). The watcher's own
+            // lastActAt check stays correct because executeMoves/soccer_play stamp it.
+            if (!result.acted) {
+              ctx.logger.warn(`[${label}] agent responded without acting (turn ${turn}): ${result.reason}`);
+            }
           },
           {
             signal: controller.signal,

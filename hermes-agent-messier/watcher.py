@@ -23,15 +23,20 @@ from . import decide as D
 _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 _complete: Optional[Callable[[List[Dict[str, str]]], str]] = None
+_complete_structured: Optional[Callable[..., Any]] = None
 _log: Callable[[str], None] = lambda m: None
 _status: Dict[str, Any] = {"running": False, "lastDecision": None, "moves": 0, "matchId": None}
 
 
-def configure(complete: Callable[[List[Dict[str, str]]], str], log: Callable[[str], None] = None) -> None:
+def configure(complete: Callable[[List[Dict[str, str]]], str], log: Callable[[str], None] = None,
+              complete_structured: Optional[Callable[..., Any]] = None) -> None:
     """Connector wires the host's LLM (and logger) into the core. Called once at
-    plugin register; the watcher uses these when started."""
-    global _complete, _log
+    plugin register; the watcher uses these when started. `complete_structured`
+    is optional — when the host (and trust policy) provides it, the decision core
+    prefers it for host-enforced JSON; otherwise it degrades to `complete`."""
+    global _complete, _complete_structured, _log
     _complete = complete
+    _complete_structured = complete_structured
     if log:
         _log = log
 
@@ -157,7 +162,7 @@ def _loop(cadence_ms: int) -> None:
                 _stop.wait(cadence_ms / 1000.0)
                 continue
 
-            moves = D.decide(view, _complete, spec) if _complete else []
+            moves = D.decide(view, _complete, spec, _complete_structured) if _complete else []
             for pid, action, say, params in moves:
                 _post_move(match_id, pid, action, say, token, params, spec=spec, did=agent_id)
             _status.update(lastDecision=time.time(), moves=_status["moves"] + len(moves), matchId=match_id)

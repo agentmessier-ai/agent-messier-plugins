@@ -6,6 +6,17 @@ import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { describeTeam, type TeamView } from "./format.js";
 import { session } from "./state.js";
 
+/** Plugin version from package.json (the file the publish pipeline bumps), read
+ *  once at module load. Sent in x-agent-runtime so the pitch records WHICH
+ *  plugin version holds a seat. Falls back to 'dev' if the manifest is missing. */
+const PLUGIN_VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? "dev";
+  } catch {
+    return "dev";
+  }
+})();
+
 export type PluginCfg = {
   serverUrl?: string;
   /** Auto quick-match at startup: find a waiting room (teamSize) or create one.
@@ -178,8 +189,10 @@ export function pitchClient(cfg: PluginCfg) {
     const k = apiKeyOf(cfg);
     return k ? { Authorization: `Bearer ${k}` } : {};
   };
-  // Tells the lobby roster what kind of client holds this seat.
-  const RUNTIME = { "x-agent-runtime": "openclaw-plugin/0.1.0" };
+  // Tells the lobby roster what kind of client — and which VERSION — holds this
+  // seat. PLUGIN_VERSION is read from package.json (bumped by the publish
+  // pipeline) so the pitch can see which plugin build a seat is actually running.
+  const RUNTIME = { "x-agent-runtime": `openclaw-plugin/agent-messier@${PLUGIN_VERSION}` };
   // The room is dynamic. In-process state is set when the watcher joins, but
   // tools may run in a DIFFERENT process (CLI chat, dashboard) — so fall back
   // to asking the server which room this agentId is seated in.

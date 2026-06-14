@@ -35,7 +35,16 @@ export type WatcherCfg = {
   actTool?: string;
   /** Log tag for this venue's watcher (e.g. "agent-soccer"). Default "agentnet". */
   label?: string;
+  /** Watchdog: max ms a single delivery may hold the in-flight latch. If a
+   *  deliver (subagent run) hangs or runs longer than this, the watcher releases
+   *  the latch, warns, and delivers the freshest frame — so a slow/stuck decision
+   *  can't silence the team for the full subagent timeout. Default 45000. */
+  deliverTimeoutMs?: number;
 };
+
+/** Default per-delivery watchdog (ms). Matches index.ts's waitForRun timeout so
+ *  the latch is released right around when the run would time out anyway. */
+export const DEFAULT_DELIVER_TIMEOUT_MS = 45_000;
 
 // ── human-editable strategy (Phase 5) ────────────────────────────────────────
 // A markdown file the manager edits; injected into the move prompt. mtime-cached
@@ -166,6 +175,8 @@ export async function startObserveWatcher(
       .finally(() => { specFetching = false; });
   }
 
+  const deliverTimeoutMs = cfg.deliverTimeoutMs ?? DEFAULT_DELIVER_TIMEOUT_MS;
+
   function maybeDeliver() {
     if (busy || signal?.aborted || latest === null || latestSeq === deliveredSeq) return;
     // Match over → stop prompting. No message to the gateway = no LLM call.
@@ -173,9 +184,39 @@ export async function startObserveWatcher(
     busy = true;
     const seq = latestSeq;
     const obs = latest;
+    // Act-verification baseline: if the act tool doesn't stamp lastActAt past
+    // this during the run, the agent was prompted but never moved its team.
+    const actAtBefore = session.lastActAt;
+
+    // The watchdog and the deliver race for the latch. Whichever fires FIRST
+    // owns the release; `settled` makes the loser a no-op, so a slow deliver that
+    // resolves AFTER the watchdog can't double-release or re-deliver the same
+    // seq. Without this, a hung deliver (subagent run) would hold `busy` for the
+    // whole subagent timeout and silence the team on stale standing orders.
+    let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const release = (onTimeout: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog !== undefined) clearTimeout(watchdog);
+      deliveredSeq = seq;
+      busy = false;
+      if (onTimeout) {
+        logger?.warn(`[${tag}] deliver exceeded ${deliverTimeoutMs}ms — releasing latch, agent may be stalled`);
+      } else if (session.lastActAt === actAtBefore) {
+        // The run finished but no action was POSTed — surfaced, never gated.
+        session.noActTurns++;
+        logger?.warn(`[${tag}] agent responded without acting (turn ${seq})`);
+      }
+      maybeDeliver();
+    };
+
+    watchdog = setTimeout(() => release(true), deliverTimeoutMs);
+    signal?.addEventListener("abort", () => { if (watchdog !== undefined) clearTimeout(watchdog); }, { once: true });
+
     Promise.resolve(deliver(prompt(obs, cfg.mode ?? "easy", cfg.strategyFile, spec, actTool)))
       .catch((e) => logger?.error(`[${tag}] deliver failed: ${String(e)}`))
-      .finally(() => { deliveredSeq = seq; busy = false; maybeDeliver(); });
+      .finally(() => release(false));
   }
 
   let attempt = 0;

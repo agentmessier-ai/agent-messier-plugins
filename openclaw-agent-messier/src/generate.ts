@@ -37,6 +37,10 @@ function did(venueId: string, cfg: PluginCfg): string {
 async function vfetch(base: string, path: string, opts: { method?: string; body?: unknown; cfg: PluginCfg; token?: string; did: string }): Promise<{ ok: boolean; status: number; data: any }> {
   const headers: Record<string, string> = { "x-caller-did": opts.did, "x-agent-runtime": "openclaw-plugin/0.2.0" };
   if (session.lastModel) headers["x-agent-model"] = session.lastModel; // effective LLM for the pitch roster
+  // Prompt→act latency: ms from when the watcher delivered the move prompt to
+  // this call. The pitch reads x-agent-decision-ms to record decision speed. Only
+  // meaningful on the act POST, but harmless elsewhere (server ignores it there).
+  if (session.promptDeliveredAt != null) headers["x-agent-decision-ms"] = String(Math.max(0, Date.now() - session.promptDeliveredAt));
   const key = apiKeyOf(opts.cfg); if (key) headers["Authorization"] = `Bearer ${key}`;
   if (opts.token) headers["x-agent-token"] = opts.token;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -168,6 +172,7 @@ export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg)
             const path = sub(actRoute, { matchId: seat.id ?? "", did: d, playerId: String(m.player ?? "") });
             const body = { agentId: d, type: action, ...whitelist(m, s.params ?? {}), ...(session.lockstep ? { turn: session.turn } : {}) };
             const r = await vfetch(base, path, { cfg, did: d, method: "POST", body, token: seat.token });
+            if (r.ok) session.lastActAt = Date.now(); // act-verification: the agent moved its team this turn
             applied.push(r.ok ? { player: m.player, type: action } : { player: m.player, error: r.data?.error ?? r.status });
           }
           return ok({ applied });
@@ -182,6 +187,7 @@ export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg)
           const path = sub(actRoute, { matchId: seat.id ?? "", did: d, playerId: String(p.player ?? "") });
           const r = await vfetch(base, path, { cfg, did: d, method: "POST", body: { type: action, ...whitelist(p, s.params ?? {}) }, token: seat.token });
           if (!r.ok) return ok({ error: r.data?.error ?? `act ${r.status}` });
+          session.lastActAt = Date.now(); // act-verification: the agent acted this turn
           return ok({ type: action, result: r.data });
         } } as AnyAgentTool);
     }

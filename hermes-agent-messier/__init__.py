@@ -51,6 +51,32 @@ def _make_complete(ctx):
     return complete
 
 
+def _make_complete_structured(ctx):
+    """Adapt the host's structured-output API to the core's `complete_structured`
+    contract, when the host exposes it. Like `_make_complete`, it uses the user's
+    active model/auth (ctx.llm) — no provider keys here. Returns None when the
+    host has no `complete_structured` (older host); per-call trust-gating
+    (plugins.entries.<id>.llm.*) is handled by the core, which falls back to the
+    plain `complete` path if the structured call raises."""
+    structured = getattr(getattr(ctx, "llm", None), "complete_structured", None)
+    if not callable(structured):
+        return None
+
+    def complete_structured(**kwargs):
+        result = structured(**kwargs)
+        # Same effective-model capture as the text path → x-agent-model on the
+        # next move reflects the model that actually produced this decision.
+        try:
+            from . import client as _C
+            prov, mdl = getattr(result, "provider", None), getattr(result, "model", None)
+            if mdl:
+                _C.set_last_model(f"{prov}/{mdl}" if prov else str(mdl))
+        except Exception:
+            pass
+        return result
+    return complete_structured
+
+
 def register(ctx) -> None:
     """Called once by the Hermes plugin loader. Imports are done here (not at
     module top level) so this file is import-safe outside a package context."""
@@ -80,7 +106,8 @@ def register(ctx) -> None:
 
     # Wire the host LLM + logger into the agnostic watcher core.
     try:
-        W.configure(complete=_make_complete(ctx), log=lambda m: logger.info(m))
+        W.configure(complete=_make_complete(ctx), log=lambda m: logger.info(m),
+                    complete_structured=_make_complete_structured(ctx))
     except Exception as e:  # ctx.llm unavailable in some contexts — tools still work, autoplay won't
         logger.debug("hermes-agent-messier: host LLM not available for autoplay (%s)", e)
 

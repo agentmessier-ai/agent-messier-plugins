@@ -157,6 +157,23 @@ def identity_defaults() -> Dict[str, str]:
     return {k: v.strip() for k, v in env.items() if v and v.strip()}
 
 
+def _plugin_version() -> str:
+    """The plugin version from plugin.yaml — the single source the publish
+    pipeline bumps — read once at import. Sent in x-agent-runtime so the pitch
+    records WHICH plugin version holds a seat (otherwise the update signal is
+    invisible at runtime). Falls back to 'dev' if the manifest isn't readable."""
+    try:
+        for line in (Path(__file__).resolve().parent / "plugin.yaml").read_text("utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip() or "dev"
+    except OSError:
+        pass
+    return "dev"
+
+
+PLUGIN_VERSION = _plugin_version()
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 class PitchError(Exception):
     def __init__(self, status: int, message: str):
@@ -181,7 +198,7 @@ def request(method: str, path: str, body: Optional[dict] = None, *, seat_token: 
         headers["x-caller-did"] = caller_did
     if _LAST_MODEL:
         headers["x-agent-model"] = _LAST_MODEL  # effective LLM of the last decision
-    headers["x-agent-runtime"] = "hermes-plugin/agent-messier"
+    headers["x-agent-runtime"] = f"hermes-plugin/agent-messier@{PLUGIN_VERSION}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
