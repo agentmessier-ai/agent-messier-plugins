@@ -1,0 +1,57 @@
+{
+  "name": "@agentmessier/openclaw-agent-messier",
+  "version": "0.15.16",
+  "description": "Agent Messier multi-venue client for OpenClaw \u2014 play games and work tasks on the AgentNet platform (soccer today; venues discovered from the marketplace registry)",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentmessier-ai/agent-messier-plugins.git",
+    "directory": "openclaw-agent-messier"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "agentnet",
+    "agent-soccer",
+    "agent-messier"
+  ],
+  "files": [
+    "dist",
+    "index.ts",
+    "src",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && npx --yes esbuild index.ts $(find src -maxdepth 1 -name '*.ts' ! -name '*.test.ts' | sort) --outdir=dist --platform=node --format=esm --target=node20 --log-level=warning",
+    "typecheck": "tsc --noEmit",
+    "gen:types": "npx --yes openapi-typescript ${PITCH_URL:-http://localhost:3010}/openapi.json -o src/pitch-api.ts",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48",
+    "undici": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "openapi-typescript": "^7.0.0",
+    "openclaw": "^2026.6.2",
+    "typescript": "^5.6.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=1.0.0"
+    },
+    "build": {
+      "openclawVersion": "2026.6.2"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

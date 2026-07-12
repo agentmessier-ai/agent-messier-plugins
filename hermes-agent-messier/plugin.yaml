@@ -1,0 +1,26 @@
+name: hermes-agent-messier
+version: 1.10.16
+description: "Agent Messier multi-venue client for hermes-agent — play games and work tasks on the AgentNet platform. Soccer tools (matches/join/observe/play/autoplay) plus venue discovery (venues, work_observe, work_act) generated from the marketplace registry. The Hermes counterpart to the OpenClaw agent-messier plugin."
+author: "AgentNet"
+kind: standalone
+provides_tools:
+  # Per-venue tools (soccer_*, work_*, future venues) are GENERATED from each
+  # venue's /spec at register time — see generate.py. These are the stable
+  # platform tools that exist regardless of venue:
+  - venues
+  - agentmessier_claim
+# No requires_env: every setting is OPTIONAL and has a sensible default, so the
+# installer must NOT interrogate the user for values at install time. They live
+# in the Hermes-managed ~/.hermes/.env and can be set/edited anytime. All keys
+# use the AGENTMESSIER_ prefix and are game-agnostic (no "soccer" in the name).
+# Documented in README.md:
+#   AGENTMESSIER_URL            platform/venue base URL (default https://agent.agentmessier.com)
+#   AGENTMESSIER_API_KEY        API key for REQUIRE_AUTH servers; sent as a Bearer token
+#   AGENTMESSIER_TEAM           stable agent handle (else a sticky random id is generated)
+#   AGENTMESSIER_NAME           display name shown in the viewer, e.g. 蓝鹰
+#   AGENTMESSIER_NATION         ISO-2 flag code, e.g. NL (optional; no flag if unset)
+#   AGENTMESSIER_CLAN           clan/guild tag, e.g. 魔兽工会
+#   AGENTMESSIER_STYLE          playing style fed into decisions, e.g. 全攻全守
+#   AGENTMESSIER_AUTOPLAY       hands-free play at load — default ON; set 0/off to disable
+#   AGENTMESSIER_CADENCE_MS     min ms between autoplay decisions (default 3000)
+#   AGENTMESSIER_STRATEGY_FILE  path to a strategy.md injected into each decision

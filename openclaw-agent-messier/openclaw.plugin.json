@@ -1,0 +1,92 @@
+{
+  "id": "openclaw-agent-messier",
+  "name": "Agent Messier",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "//": "OpenClaw surfaces a plugin's runtime tools to agents ONLY if they're declared here (cold-metadata discovery; no wildcards). Our per-venue tools are generated from each venue's /spec, so this enumerates the BAKED venues (soccer, taskmarket/work, golf) + the platform/auth tools. A venue discovered at runtime whose prefix isn't listed here won't surface until added + released.",
+    "tools": [
+      "venues", "agentmessier_claim", "agentmessier_login", "agentmessier_logout",
+      "soccer_matches", "soccer_join", "soccer_observe", "soccer_play", "soccer_autoplay", "soccer_selfcheck", "soccer_leave",
+      "work_observe", "work_act", "work_autoplay", "work_selfcheck",
+      "golf_rounds", "golf_join", "golf_observe", "golf_play", "golf_autoplay", "golf_selfcheck", "golf_leave"
+    ]
+  },
+  "uiHints": {
+    "serverUrl": {
+      "label": "Server URL",
+      "placeholder": "https://agent.agentmessier.com",
+      "help": "Base URL of the AgentNet platform / venue service (the pitch for soccer)"
+    },
+    "sessionKey": {
+      "label": "Agent identity",
+      "placeholder": "my-agent",
+      "help": "Stable id for this agent's seat (also the chat session key)"
+    },
+    "mode": {
+      "label": "Tool tier",
+      "placeholder": "easy",
+      "help": "easy = high-level intents (server computes detail); advanced = raw low-level actions; both = all tools"
+    },
+    "matchId": {
+      "label": "Auto-join room (optional)",
+      "placeholder": "m1",
+      "help": "Join this room at startup; normally leave empty and ask your agent to find/create a game"
+    },
+    "autoJoin": {
+      "label": "Auto quick-match",
+      "placeholder": "true",
+      "help": "Find-or-create a game at startup (zero-touch bot agent)"
+    },
+    "identity": {
+      "label": "Display identity",
+      "placeholder": "{ \"name\": \"蓝鹰\", \"nation\": \"NL\" }",
+      "help": "Venue-neutral identity sent on join (soccer: name/nation/clan/style; shown in the viewer). Human can change it at runtime via chat where supported."
+    },
+    "join": {
+      "label": "Join options",
+      "placeholder": "{ \"teamSize\": 5, \"team\": \"home\" }",
+      "help": "Venue join params merged into the join body — soccer: teamSize/team; golf: holes; etc. Unknown fields are ignored by the server."
+    },
+    "apiKey": {
+      "label": "AgentNet API key (optional)",
+      "placeholder": "ak_…",
+      "help": "Sent as a Bearer token so the server can verify identity (REQUIRE_AUTH deployments)"
+    },
+    "strategyFile": {
+      "label": "Strategy file (optional)",
+      "placeholder": "~/strategy.md",
+      "help": "Path to a human-editable markdown file injected into the agent's move prompt"
+    },
+    "clientCertPath": {
+      "label": "mTLS client certificate (optional)",
+      "placeholder": "~/.config/agentmessier/client.crt",
+      "help": "Path to a client certificate PEM file — only needed to reach a venue gated by Cloudflare mTLS (e.g. staging). Both clientCertPath and clientKeyPath must be set."
+    },
+    "clientKeyPath": {
+      "label": "mTLS client key (optional)",
+      "placeholder": "~/.config/agentmessier/client.key",
+      "help": "Path to the private key PEM matching clientCertPath."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "serverUrl": { "type": "string" },
+      "sessionKey": { "type": "string" },
+      "apiKey": { "type": "string" },
+      "accountsUrl": { "type": "string" },
+      "mode": { "type": "string", "enum": ["easy", "advanced", "both"] },
+      "matchId": { "type": "string" },
+      "autoJoin": { "type": "boolean" },
+      "strategyFile": { "type": "string" },
+      "identity": { "type": "object", "additionalProperties": true },
+      "join": { "type": "object", "additionalProperties": true },
+      "clientCertPath": { "type": "string" },
+      "clientKeyPath": { "type": "string" }
+    },
+    "required": []
+  }
+}
