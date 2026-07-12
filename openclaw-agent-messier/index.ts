@@ -100,6 +100,8 @@ function registerVenueService(
   const base = venueUrl(venue.origin, cfg);
 
   let controller: AbortController | null = null;
+  // Cancels the background startup-seating retry loop (see below) on service stop.
+  let stopping = false;
 
   api.registerService({
     id: `agentmessier-${venue.id}-watcher`,
@@ -227,12 +229,39 @@ function registerVenueService(
       // action needed. cfg.matchId pins a specific room instead of quickmatch.
       // Set cfg.autoJoin: false for the legacy idle-on-boot behavior (wait for
       // <venue>_join). (Skipped when we just resumed an existing seat above.)
-      try {
-        if (resumed) { /* already seated + watching the resumed match — skip seat logic */ }
-        else if (cfg.matchId) { await joinVenue(venue, spec, cfg, { matchId: cfg.matchId, extra: joinExtra() }); state.startWatcher(); }
-        else if (cfg.autoJoin !== false) { await joinVenue(venue, spec, cfg, { extra: joinExtra() }); state.startWatcher(); }
-        else ctx.logger.info(`[${label}] idle — ${spec.client?.join?.tool ?? "join"} a match to play${spec.client?.autoplay ? ` (then ${spec.client.autoplay.tool} on if not auto-delegated)` : ""}.`);
-      } catch (e) { ctx.logger.error(`[${label}] startup seating failed: ${String(e)}`); }
+      if (resumed) {
+        /* already seated + watching the resumed match — skip seat logic */
+      } else if (cfg.autoJoin === false) {
+        ctx.logger.info(`[${label}] idle — ${spec.client?.join?.tool ?? "join"} a match to play${spec.client?.autoplay ? ` (then ${spec.client.autoplay.tool} on if not auto-delegated)` : ""}.`);
+      } else {
+        // Keep-retry, same philosophy as noteFailure above ("we never pause, we
+        // FLAG"): a network hiccup at boot must not idle the agent forever
+        // despite autoJoin being on — this was the root cause of a live E2E
+        // failure (2026-07-12): the one-shot try/catch below logged and gave
+        // up, and with no venue-tools poller ever re-triggering it, the agent
+        // never joined for the rest of the process's life. Retried in the
+        // BACKGROUND (not awaited) so it never blocks preflight below; backoff
+        // 15s → cap 60s; `stopping` lets service stop() cancel it cleanly.
+        const seatOnce = () => cfg.matchId
+          ? joinVenue(venue, spec, cfg, { matchId: cfg.matchId, extra: joinExtra() })
+          : joinVenue(venue, spec, cfg, { extra: joinExtra() });
+        void (async () => {
+          let delayMs = 15_000;
+          for (;;) {
+            try {
+              await seatOnce();
+              state.startWatcher?.();
+              return;
+            } catch (e) {
+              if (stopping) return;
+              ctx.logger.warn(`[${label}] startup seating failed (retrying in ${Math.round(delayMs / 1000)}s): ${String(e)}`);
+              await new Promise((r) => setTimeout(r, delayMs));
+              if (stopping) return;
+              delayMs = Math.min(delayMs * 2, 60_000);
+            }
+          }
+        })();
+      }
 
       // Preflight the dependencies up front (server, venue, seat, PRIMARY MODEL).
       // Keep-retry: we've already armed; this surfaces readiness so a broken model
@@ -247,6 +276,7 @@ function registerVenueService(
 
     stop: async (ctx) => {
       ctx.logger.info(`[${label}] watcher stopping`);
+      stopping = true;
       controller?.abort();
       controller = null;
       state.startWatcher = null;

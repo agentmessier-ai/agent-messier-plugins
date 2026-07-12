@@ -110,21 +110,25 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
   // it. Only fall back to a per-match re-fetch when no venue spec was supplied
   // (the soccer-centric ladder would mis-resolve a golf round).
   let spec: GameSpec | null = options.spec ?? await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId);
-  // …but the BAKED spec carries no `instructions` (register() is sync, can't
-  // fetch), so the move prompt would be stuck on the thin FALLBACK — leading the
-  // model to give zone-less, samey orders that pile the team together. Hermes
-  // always reads the server's per-match instructions; do the same here: enrich
-  // from the live /spec when missing (keep the baked routes). Offline → FALLBACK.
-  if (spec && !spec.instructions) {
-    const live = await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId).catch(() => null);
-    if (live?.instructions) spec = { ...spec, instructions: live.instructions };
-  }
   const cadence = Math.max(MIN_CADENCE_MS, cfg.cadenceMs ?? spec?.observe?.suggestedIntervalMs ?? DEFAULT_CADENCE_MS);
 
   while (true) {
     if (signal?.aborted) return;
     if (spec === null) {
       spec = await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId).catch(() => null);
+    }
+    // …but a BAKED spec carries no `instructions` (register() is sync, can't
+    // fetch), so the move prompt would be stuck on the thin FALLBACK — leading
+    // the model to give zone-less, samey orders that pile the team together.
+    // Hermes always reads the server's per-match instructions; do the same
+    // here: enrich from the live /spec when missing (keep the baked routes).
+    // Retried EVERY tick while missing (Hermes watcher.py parity: "a None
+    // result is NOT cached, so the next tick retries — degraded, never
+    // permanently") rather than once at watcher start, so a cold-start network
+    // hiccup self-heals the moment the pitch becomes reachable, not never.
+    if (spec && !spec.instructions) {
+      const live = await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId).catch(() => null);
+      if (live?.instructions) spec = { ...spec, instructions: live.instructions };
     }
 
     let view: (TeamView & { summary?: string }) | null = null;

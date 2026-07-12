@@ -188,10 +188,35 @@ setup_openclaw(){
   # plugin to plugins.allow (which lets plugin tools past the default "coding"
   # profile) and that is enough for SOME providers (e.g. gemini) — but others
   # (e.g. openai/gpt-5*) still filter plugin-owned tools unless explicitly
-  # allowed. tools.alsoAllow is the model-agnostic switch; scope it to THIS
-  # plugin's id (not the broader group:plugins) — least privilege, and it
-  # doesn't also expose every other installed plugin's tools.
-  oc_array_add "tools.alsoAllow" "$OC_ID"
+  # allowed via tools.alsoAllow. Found live: OpenClaw's tool-policy engine
+  # matches every tools.alsoAllow entry as a LITERAL TOOL NAME (or one of its
+  # own built-in `group:<core-section>` keys) — it has NO concept of "this
+  # plugin's id" as an allowlist entry. A previous version of this script set
+  # alsoAllow to the plugin id itself (least-privilege intent, scoped away
+  # from the broader group:plugins) — but that id matches no tool name and no
+  # group, so it silently allowed NOTHING: an agent ended up with zero
+  # soccer_* tools and fell back to hand-rolled curl against the pitch's HTTP
+  # API. List each tool name explicitly instead, read from the just-installed
+  # manifest's own contracts.tools (single source of truth — can't drift from
+  # what the plugin actually registers, and self-heals on every install/update
+  # run since oc_array_add is idempotent).
+  OC_TOOL_NAMES="$(node -e '
+const fs=require("fs");
+try {
+  const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const tools = m.contracts && Array.isArray(m.contracts.tools) ? m.contracts.tools : [];
+  process.stdout.write(tools.join("\n"));
+} catch (e) {}
+' "$HOME/.openclaw/extensions/$OC_ID/openclaw.plugin.json" 2>/dev/null || true)"
+  if [ -n "$OC_TOOL_NAMES" ]; then
+    while IFS= read -r t; do
+      [ -n "$t" ] && oc_array_add "tools.alsoAllow" "$t"
+    done <<< "$OC_TOOL_NAMES"
+  else
+    # Manifest unreadable (shouldn't happen right after a successful install/
+    # update above) — fall back to the id so this is no worse than before.
+    oc_array_add "tools.alsoAllow" "$OC_ID"
+  fi
   # Hands-free play ON by default at 11v11: the watcher quick-matches and plays a
   # full match at startup. Each default is set only when the operator hasn't chosen
   # one — never override an explicit autoJoin:false or a custom team size. NOTE:

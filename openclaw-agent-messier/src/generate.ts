@@ -16,6 +16,7 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/core";
 import { ok, err, venueUrl, agentIdOf, identityOf, rememberDid, rememberToken, cacheFilePath, secureWriteJson, secureReadJson, type GameSpec, type PluginCfg } from "./tools.js";
 import { authedFetch, getPitchAgent } from "./http.js";
 import { session, type RuntimeSession } from "./state.js";
+import { ACTION_TYPES } from "./decide.js";
 
 /** Thrown by joinVenue on a failed join, carrying the HTTP status so callers
  *  (buildJoin) can give unmistakable, status-specific guidance — e.g. a 401
@@ -358,6 +359,70 @@ const DEFAULT_VENUES: Venue[] = [
   { id: "agent-golf", origin: "pitch", specUrl: "/golf/spec" },
 ];
 
+/** Baked-in venues + minimal specs used ONLY when discovery/spec fetch is
+ *  unreachable AND no disk cache exists yet (first-run-offline / a gateway
+ *  cold-start that races the network) — the plugin still registers venue
+ *  tools + starts the autoplay watcher offline, exactly like the Hermes
+ *  plugin's DEFAULT_VENUES/DEFAULT_SPECS (generate.py:390-423). Without this,
+ *  a single failed cold-start fetch permanently disabled venue tools for the
+ *  life of the process (no retry ever fired autoJoin never had a tool to
+ *  call) — the root cause of a live E2E failure (2026-07-12).
+ *  Kept in sync BY HAND with services/pitch/src/api/spec.ts (GAME_SPEC) and
+ *  services/taskmarket/src/gsp/spec.ts (WORK_SPEC) — same convention as
+ *  decide.ts's ACTION_TYPES/FALLBACK_ACTIONS fallback lists. */
+const DEFAULT_SPECS: Record<string, GameSpec> = {
+  "agent-soccer": {
+    game: "agent-soccer",
+    specVersion: 1,
+    rulesVersion: 1,
+    actions: { type: "string", enum: [...ACTION_TYPES], descriptions: {} },
+    observe: { mode: "stream", suggestedIntervalMs: 3000 },
+    routes: {
+      observe: "/matches/{matchId}/agents/{did}/observe",
+      state: "/matches/{matchId}/agents/{did}/state",
+      act: "/matches/{matchId}/players/{playerId}/action",
+      decision: "/matches/{matchId}/agents/{did}/decision",
+    },
+    client: {
+      prefix: "soccer",
+      noun: "match",
+      lobby: { tool: "soccer_matches", route: "/matches", params: { status: { type: "string", enum: ["live", "waiting", "ended"] } }, summary: "List Agent Messier soccer matches (offline default)." },
+      join: {
+        tool: "soccer_join", route: "/quickmatch", seatRoute: "/matches/{matchId}/join",
+        params: { teamSize: { type: "integer" }, team: { type: "string" }, name: { type: "string" }, nation: { type: "string" }, clan: { type: "string" }, style: { type: "string" }, matchId: { type: "string" } },
+        seat: { id: "matchId", token: "token", controls: "playerIds" },
+        summary: "Join a match and take a side. Pass matchId for a specific room, else quickmatch.",
+      },
+      observe: { tool: "soccer_observe", params: {}, summary: "See the pitch." },
+      act: {
+        tool: "soccer_play",
+        params: { player: { type: "string" }, dir: { type: "array", items: { type: "number" } }, distance: { type: "number" }, power: { type: "number" }, zone: { type: "string" }, say: { type: "string" } },
+        summary: "Order a player.",
+      },
+      autoplay: { tool: "soccer_autoplay", delegate: true, summary: "Hands-free play on/off." },
+      leave: { tool: "soccer_leave", route: "/matches/{matchId}/leave", summary: "Leave your match (forfeit if live)." },
+    },
+  },
+  taskmarket: {
+    game: "taskmarket",
+    specVersion: 1,
+    rulesVersion: 1,
+    actions: { type: "string", enum: ["post", "bid", "accept", "deliver", "confirm", "cancel", "dispute"], descriptions: {} },
+    observe: { mode: "poll", suggestedIntervalMs: 30000 },
+    routes: { observe: "/agents/{did}/observe", act: "/agents/{did}/action" },
+    client: {
+      prefix: "taskmarket", noun: "task", lobby: null, join: null,
+      observe: { tool: "work_observe", params: { cursor: { type: "number" } }, summary: "See the task market." },
+      act: {
+        tool: "work_act",
+        params: { taskId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, budget: { type: "number" }, price: { type: "number" }, message: { type: "string" }, etaHours: { type: "number" }, bidId: { type: "string" }, result: { type: "string" } },
+        summary: "Act in the task market.",
+      },
+      autoplay: { tool: "work_autoplay", summary: "Hands-free work on/off." },
+    },
+  },
+};
+
 export async function discoverVenues(cfg: PluginCfg): Promise<Venue[]> {
   try {
     const res = await fetch(`${venueUrl("pitch", cfg)}/platform/marketplaces`, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
@@ -373,12 +438,15 @@ export async function fetchVenueSpec(venue: Venue, cfg: PluginCfg): Promise<Game
     // handshake itself requires the cert), or nothing on that venue loads.
     const res = await fetch(`${venueUrl(venue.origin, cfg)}${venue.specUrl ?? "/spec"}`, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
     if (res.ok) { const s = (await res.json()) as GameSpec; if (s?.client) return s; }
-  } catch { /* offline → caller skips this venue's generated tools */ }
+  } catch { /* offline → caller falls back to disk cache, then the baked default */ }
   return null;
 }
 
-/** Fetch a venue's spec live, write to disk cache on success; on network failure
- *  return the cached copy; return null only on first-run-offline (no cache yet).
+/** Fetch a venue's spec live, write to disk cache on success; on network
+ *  failure return the cached copy; on first-run-offline (no cache yet) fall
+ *  back to the baked DEFAULT_SPECS entry (if any) so tool generation and the
+ *  autoplay watcher never hard-fail on a cold-start network hiccup — only
+ *  null when the venue is truly unknown (not in DEFAULT_SPECS either).
  *  Cache key: `spec-<venue.id>` under ~/.agent-messier/cache/. */
 export async function loadVenueSpec(venue: Venue, cfg: PluginCfg): Promise<GameSpec | null> {
   const path = cacheFilePath(`spec-${venue.id}`);
@@ -387,8 +455,8 @@ export async function loadVenueSpec(venue: Venue, cfg: PluginCfg): Promise<GameS
     secureWriteJson(path, live);
     return live;
   }
-  // Live fetch failed (offline / non-200) — fall back to the disk cache.
-  return secureReadJson<GameSpec>(path);
+  // Live fetch failed (offline / non-200) — fall back to the disk cache, then the baked default.
+  return secureReadJson<GameSpec>(path) ?? DEFAULT_SPECS[venue.id] ?? null;
 }
 
 /** Every venue's generated tools — discovered from the registry, spec per venue. */
