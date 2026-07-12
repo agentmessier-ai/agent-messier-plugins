@@ -117,6 +117,16 @@ export type AuthedFetchOpts = {
 
 export type AuthedFetchResult = { ok: boolean; status: number; data: any };
 
+/** Hard ceiling on one in-flight request. Nothing else in this stack bounds a
+ *  request that gets a connection but never gets a response: getPitchAgent's
+ *  keepAliveTimeout only governs an IDLE socket between requests, not one
+ *  awaiting a reply. Without this, a single hung connection (found live in a
+ *  staging e2e run, 2026-07-12: one clean 502 logged fine, then total silence
+ *  for the rest of the run) parks the watcher's `while(true)` loop on one
+ *  unresolved `await` forever — no further ticks, no further log lines,
+ *  indistinguishable from a healthy idle match until the process is killed. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /** One authenticated HTTP call to a venue: every available identity header (the
  *  server uses what it needs — Bearer→DID for games, x-caller-did for work, seat
  *  token for acts), proactive-refreshed OAuth preferred over the static API key,
@@ -147,7 +157,9 @@ export async function authedFetch(base: string, path: string, opts: AuthedFetchO
 
   const f = opts.fetchImpl ?? ((u: string, i: RequestInit) => pitchFetch(u, i, opts.cfg));
   const body = opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {};
-  const signalInit = opts.signal ? { signal: opts.signal } : {};
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const combinedSignal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
+  const signalInit = { signal: combinedSignal };
   let res = await f(`${base}${path}`, { method: opts.method ?? "GET", headers, ...body, ...signalInit });
   // Reactive 401 recovery: refresh once and retry (skip if we weren't using OAuth
   // — a stale static API key 401s the same way on every retry, so don't loop).
