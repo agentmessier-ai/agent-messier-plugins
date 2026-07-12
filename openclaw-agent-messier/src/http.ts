@@ -12,7 +12,7 @@
  */
 import os from "node:os";
 import { readFileSync } from "node:fs";
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { PLUGIN_VERSION, type PluginCfg } from "./tools.js";
 import { getAccessToken, refreshAfter401, effectiveApiKey } from "./oauth.js";
 import { session, type RuntimeSession } from "./state.js";
@@ -55,6 +55,25 @@ export function getPitchAgent(cfg?: PluginCfg): Agent {
 /** Test-only reset so cert-path changes across test cases don't reuse a stale
  *  agent (not exercised in production — the process lives with one cfg). */
 export function _resetPitchAgent(): void { _pitchAgent = undefined; _pitchAgentCertKey = undefined; }
+
+/** Test seam: the suites stub the GLOBAL fetch (vi.stubGlobal), which pitchFetch
+ *  deliberately no longer uses — tests route through here instead (see
+ *  _setPitchFetchForTests in each suite's setup). Never set in production. */
+let _testFetch: ((url: string, init?: RequestInit) => Promise<Response>) | null = null;
+export function _setPitchFetchForTests(f: typeof _testFetch): void { _testFetch = f; }
+
+/** Every pitch fetch goes through THIS, never `fetch(url, {dispatcher})` with
+ *  the global fetch: the Agent above comes from the npm-installed undici, and
+ *  Node's BUILT-IN fetch is a different undici copy bundled with the runtime —
+ *  passing one's Agent to the other throws
+ *  `InvalidArgumentError: invalid onRequestStart method` whenever their
+ *  interceptor interfaces drift (found live 2026-07-12: every call to an
+ *  mTLS-gated venue died as `TypeError: fetch failed`, on both node 22.14 and
+ *  22.23). Same-package fetch + Agent can never mismatch. */
+export function pitchFetch(url: string, init: RequestInit, cfg?: PluginCfg): Promise<Response> {
+  if (_testFetch) return _testFetch(url, init);
+  return undiciFetch(url, { ...(init as object), dispatcher: getPitchAgent(cfg) } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
+}
 
 function traceparent(): string | undefined {
   try {
@@ -122,7 +141,7 @@ export async function authedFetch(base: string, path: string, opts: AuthedFetchO
   const tp = traceparent();
   if (tp) headers["traceparent"] = tp; // best-effort trace continuation; server extracts it
 
-  const f = opts.fetchImpl ?? ((u: string, i: RequestInit) => fetch(u, { ...i, dispatcher: getPitchAgent(opts.cfg) } as unknown as RequestInit));
+  const f = opts.fetchImpl ?? ((u: string, i: RequestInit) => pitchFetch(u, i, opts.cfg));
   const body = opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {};
   const signalInit = opts.signal ? { signal: opts.signal } : {};
   let res = await f(`${base}${path}`, { method: opts.method ?? "GET", headers, ...body, ...signalInit });

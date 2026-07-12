@@ -5,7 +5,7 @@ import { join as joinPath } from "node:path";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { session } from "./state.js";
 import { getAccessToken, effectiveApiKey } from "./oauth.js";
-import { getPitchAgent } from "./http.js";
+import { pitchFetch } from "./http.js";
 
 /** Plugin version from package.json (the file the publish pipeline bumps), read
  *  once at module load. Sent in x-agent-runtime so the pitch records WHICH
@@ -109,7 +109,7 @@ export async function fetchSpec(cfg: PluginCfg): Promise<GameSpec | null> {
     // Dispatched through the (optionally mTLS) agent — a client-cert-gated host
     // requires the cert at the TLS handshake for EVERY request, including this
     // unauthenticated spec fetch; without it, nothing on that venue works at all.
-    const res = await fetch(`${base}/spec`, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
+    const res = await pitchFetch(`${base}/spec`, {}, cfg);
     if (!res.ok) return null;
     const spec = (await res.json()) as GameSpec;
     if (!spec || typeof spec !== "object" || !Array.isArray(spec.actions?.enum)) return null;
@@ -125,7 +125,7 @@ export async function fetchMatchSpec(cfg: PluginCfg, matchId: string): Promise<G
   const base = (cfg.serverUrl ?? "https://www.agentmessier.com").replace(/\/$/, "");
   for (const url of [`${base}/matches/${encodeURIComponent(matchId)}/spec`, `${base}/spec`]) {
     try {
-      const res = await fetch(url, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
+      const res = await pitchFetch(url, {}, cfg);
       if (!res.ok) continue;
       const spec = (await res.json()) as GameSpec;
       if (spec && typeof spec === "object" && Array.isArray(spec.actions?.enum)) return spec;

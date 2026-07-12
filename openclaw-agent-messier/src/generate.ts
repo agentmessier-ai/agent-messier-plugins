@@ -14,7 +14,7 @@
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk/core";
 import { ok, err, venueUrl, agentIdOf, identityOf, rememberDid, rememberToken, cacheFilePath, secureWriteJson, secureReadJson, type GameSpec, type PluginCfg } from "./tools.js";
-import { authedFetch, getPitchAgent } from "./http.js";
+import { authedFetch, pitchFetch } from "./http.js";
 import { session, type RuntimeSession } from "./state.js";
 import { ACTION_TYPES } from "./decide.js";
 
@@ -425,7 +425,7 @@ const DEFAULT_SPECS: Record<string, GameSpec> = {
 
 export async function discoverVenues(cfg: PluginCfg): Promise<Venue[]> {
   try {
-    const res = await fetch(`${venueUrl("pitch", cfg)}/platform/marketplaces`, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
+    const res = await pitchFetch(`${venueUrl("pitch", cfg)}/platform/marketplaces`, {}, cfg);
     if (res.ok) { const { marketplaces } = (await res.json()) as { marketplaces: Venue[] }; if (marketplaces?.length) return marketplaces; }
   } catch { /* offline */ }
   return DEFAULT_VENUES;
@@ -436,7 +436,7 @@ export async function fetchVenueSpec(venue: Venue, cfg: PluginCfg): Promise<Game
     // Dispatched through the (optionally mTLS) agent — a client-cert-gated
     // venue needs it even for this unauthenticated spec fetch (the TLS
     // handshake itself requires the cert), or nothing on that venue loads.
-    const res = await fetch(`${venueUrl(venue.origin, cfg)}${venue.specUrl ?? "/spec"}`, { dispatcher: getPitchAgent(cfg) } as unknown as RequestInit);
+    const res = await pitchFetch(`${venueUrl(venue.origin, cfg)}${venue.specUrl ?? "/spec"}`, {}, cfg);
     if (res.ok) { const s = (await res.json()) as GameSpec; if (s?.client) return s; }
   } catch { /* offline → caller falls back to disk cache, then the baked default */ }
   return null;
