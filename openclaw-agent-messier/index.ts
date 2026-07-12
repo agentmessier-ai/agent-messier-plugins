@@ -49,15 +49,24 @@ export default function register(api: OpenClawPluginApi) {
     api.registerTool(tool as AnyAgentTool);
   }
 
+  // The one and only service this plugin registers — and it MUST stay the only
+  // one: OpenClaw's host collects plugin services at registration time and a
+  // service registered LATE (from inside another service's start(), as the
+  // per-venue watchers used to be) is silently never started — no error, no
+  // diagnostic, its start() simply never runs. Found live (2026-07-12): venue
+  // tools loaded but autoJoin never fired because the watcher "service" didn't
+  // exist as far as the host was concerned. So the venue watchers now run
+  // INLINE in this start() (startVenueWatcher below) and are stopped by this
+  // stop() — no nested registerService anywhere.
+  const venueCleanups: Array<() => void> = [];
   api.registerService({
     id: "agentmessier-loader",
 
     start: async (ctx) => {
       // 1. Venue lifecycle tools (soccer_join/observe/play, work_observe/act, …):
       //    fetch each venue's /spec live, write to disk cache, generate tools from
-      //    the live spec. On network failure the disk cache is the fallback. If
-      //    neither is available (first run + offline) no venue tools are loaded —
-      //    the agent should connect to the pitch once to populate the cache.
+      //    the live spec. On network failure the disk cache is the fallback, then
+      //    the baked default spec — venue tools always load for known venues.
       const venueTools = await defaultVenueTools(cfg);
       if (venueTools.length === 0) {
         ctx.logger.warn("[agentmessier] spec unavailable — venue tools not loaded; connect to the pitch once to cache the spec");
@@ -74,20 +83,27 @@ export default function register(api: OpenClawPluginApi) {
       //    the interactive/cosmetic tools (which read it) stay in sync; the rest get a
       //    fresh isolated state.
       const realtime = await defaultRealtimeVenues(cfg);
-      realtime.forEach(({ venue, spec }, i) => {
+      for (const [i, { venue, spec }] of realtime.entries()) {
         const state = i === 0 ? session : createSession();
         setVenueState(venue.id, state); // the generated act tool stamps THIS instance
-        registerVenueService(api, cfg, venue, spec, state, complete, fallbackModel);
-      });
+        venueCleanups.push(await startVenueWatcher(api, cfg, venue, spec, state, complete, fallbackModel, ctx));
+      }
     },
 
-    stop: async () => { /* venue services stop themselves */ },
+    stop: async (ctx) => {
+      for (const cleanup of venueCleanups.splice(0).reverse()) {
+        try { cleanup(); } catch (e) { ctx.logger.warn(`[agentmessier] venue watcher cleanup failed: ${String(e)}`); }
+      }
+    },
   });
 }
 
-/** Register the cadence autoplay service for one realtime venue. Seating is driven
- *  from {venue, spec}; each tick polls the state route and decides via `complete`. */
-function registerVenueService(
+/** Bootstrap the cadence autoplay watcher for one realtime venue — runs INLINE
+ *  in the loader service's start() (see the comment there for why this must not
+ *  be its own registered service). Seating is driven from {venue, spec}; each
+ *  tick polls the state route and decides via `complete`. Returns the cleanup
+ *  that the loader's stop() invokes. */
+async function startVenueWatcher(
   api: OpenClawPluginApi,
   cfg: PluginCfg,
   venue: Venue,
@@ -95,18 +111,16 @@ function registerVenueService(
   state: RuntimeSession,
   complete: LlmComplete | null,
   fallbackModel: string | undefined,
-) {
+  ctx: { logger: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void } },
+): Promise<() => void> {
   const label = venue.id;
   const base = venueUrl(venue.origin, cfg);
 
   let controller: AbortController | null = null;
-  // Cancels the background startup-seating retry loop (see below) on service stop.
+  // Cancels the background startup-seating retry loop (see below) on cleanup.
   let stopping = false;
 
-  api.registerService({
-    id: `agentmessier-${venue.id}-watcher`,
-
-    start: async (ctx) => {
+  {
       const agentId = agentIdOf(cfg);
       // Config-derived join body: a generic identity object plus any venue join
       // params (cfg.join — teamSize/team for soccer, holes for golf, …). A venue
@@ -272,17 +286,16 @@ function registerVenueService(
         else ctx.logger.info(`[${label}] preflight ok — primary model ${state.diagnosis.primaryModel ?? "unverified"}`);
       } catch (e) { ctx.logger.warn(`[${label}] preflight error: ${String(e)}`); }
       // NOTE: no lobby seat-poller — the agent never adopts a seat it didn't join.
-    },
+  }
 
-    stop: async (ctx) => {
-      ctx.logger.info(`[${label}] watcher stopping`);
-      stopping = true;
-      controller?.abort();
-      controller = null;
-      state.startWatcher = null;
-      state.stopWatcher = null;
-      state.watching = false;
-      state.matchId = null;
-    },
-  });
+  return () => {
+    ctx.logger.info(`[${label}] watcher stopping`);
+    stopping = true;
+    controller?.abort();
+    controller = null;
+    state.startWatcher = null;
+    state.stopWatcher = null;
+    state.watching = false;
+    state.matchId = null;
+  };
 }

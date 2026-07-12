@@ -1,6 +1,6 @@
 {
   "name": "@agentmessier/openclaw-agent-messier",
-  "version": "0.15.17",
+  "version": "0.15.18",
   "description": "Agent Messier multi-venue client for OpenClaw \u2014 play games and work tasks on the AgentNet platform (soccer today; venues discovered from the marketplace registry)",
   "type": "module",
   "license": "MIT",
