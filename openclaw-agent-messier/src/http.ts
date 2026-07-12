@@ -108,6 +108,9 @@ export type AuthedFetchOpts = {
    *  the pitch can tell autoplay-originated calls apart from tool calls. */
   runtimeTag?: string;
   signal?: AbortSignal;
+  /** Extra headers merged LAST (e.g. x-manager-key for the governance extras)
+   *  — never used to override Authorization/identity headers in practice. */
+  headers?: Record<string, string>;
   /** Test seam; defaults to global fetch (dispatched through getPitchAgent). */
   fetchImpl?: typeof fetch;
 };
@@ -140,6 +143,7 @@ export async function authedFetch(base: string, path: string, opts: AuthedFetchO
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   const tp = traceparent();
   if (tp) headers["traceparent"] = tp; // best-effort trace continuation; server extracts it
+  if (opts.headers) Object.assign(headers, opts.headers);
 
   const f = opts.fetchImpl ?? ((u: string, i: RequestInit) => pitchFetch(u, i, opts.cfg));
   const body = opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {};

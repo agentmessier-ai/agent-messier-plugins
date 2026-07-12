@@ -98,6 +98,14 @@ export type GameSpec = {
     act: { tool: string; params?: Record<string, unknown>; summary: string };
     autoplay?: { tool: string; summary: string; delegate?: boolean };
     leave?: { tool: string; route: string; params?: Record<string, unknown>; summary: string } | null;
+    /** CREATE-ONLY twin of join (server 2026-07-12): always a brand-new room,
+     *  never find-or-reseat. Same seat mapping as join; no matchId param. */
+    create?: { tool: string; route: string; params?: Record<string, unknown>; seat: { id: string; token: string; controls: string }; summary: string } | null;
+    /** Generic one-call tools beyond the core lifecycle — one generated tool
+     *  per row ({matchId}/{did} substituted from the current seat). `auth`
+     *  names the extra credential: 'seat' → x-agent-token, 'manager' →
+     *  x-manager-key (parsed from the join response's managerUrl #mk=). */
+    extras?: readonly { tool: string; method: string; route: string; params?: Record<string, unknown>; summary: string; auth?: string }[];
   };
 };
 

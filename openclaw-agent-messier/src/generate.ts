@@ -32,7 +32,10 @@ export class JoinError extends Error {
 }
 
 export type Venue = { id: string; origin: string; specUrl?: string };
-export type Seat = { id?: string; token?: string; controls?: string[]; agentId?: string; started?: boolean };
+export type Seat = { id?: string; token?: string; controls?: string[]; agentId?: string; started?: boolean;
+  /** The join response's manager console URL — its #mk= fragment is the
+   *  manager key the governance extras (propose/approve) authenticate with. */
+  managerUrl?: string };
 
 // Seat per venue (id/token/controls/agentId).
 const seats = new Map<string, Seat>();
@@ -62,7 +65,7 @@ function did(venueId: string, cfg: PluginCfg): string {
  *  every call site in this file stays unchanged; the global `session` (not a
  *  per-venue state) is used here, matching this function's historical
  *  single-venue-tool-call semantics. */
-async function vfetch(base: string, path: string, opts: { method?: string; body?: unknown; cfg: PluginCfg; token?: string; did: string }): Promise<{ ok: boolean; status: number; data: any }> {
+async function vfetch(base: string, path: string, opts: { method?: string; body?: unknown; cfg: PluginCfg; token?: string; did: string; headers?: Record<string, string> }): Promise<{ ok: boolean; status: number; data: any }> {
   return authedFetch(base, path, opts);
 }
 
@@ -93,9 +96,13 @@ function paramsSchema(props: Record<string, unknown>, extra: Record<string, unkn
  *  to the cross-process cache so a seat taken here is usable from another process. */
 export async function joinVenue(
   venue: Venue, spec: GameSpec, cfg: PluginCfg,
-  opts: { matchId?: string; params?: Record<string, unknown>; extra?: Record<string, unknown> } = {},
+  opts: { matchId?: string; params?: Record<string, unknown>; extra?: Record<string, unknown>;
+    /** Seat via a DIFFERENT spec step than client.join — the create tool passes
+     *  client.create here (its route always makes a brand-new room); everything
+     *  downstream (body build, seat mapping, state hydration) is identical. */
+    step?: { route: string; params?: Record<string, unknown>; seat: { id: string; token: string; controls: string } } } = {},
 ): Promise<Seat> {
-  const j = spec.client?.join;
+  const j = opts.step ? { ...opts.step, seatRoute: undefined as string | undefined } : spec.client?.join;
   if (!j) throw new Error(`${venue.id} is not joinable (no client.join in spec)`);
   const sm = j.seat;
   const base = venueUrl(venue.origin, cfg);
@@ -125,7 +132,8 @@ export async function joinVenue(
   // silently return an unseated "seat" for the caller to act as if joined
   // (mirrors Hermes's generate.py:172-174 "2xx with no match id is NOT a join").
   if (seatId == null) throw new JoinError(`join ${venue.id}: server accepted the request but returned no match id — not seated`, r.status);
-  const seat: Seat = { id: seatId, token: d[sm.token], controls: d[sm.controls] ?? [], agentId: d.did ?? meId, started: d.started };
+  const seat: Seat = { id: seatId, token: d[sm.token], controls: d[sm.controls] ?? [], agentId: d.did ?? meId, started: d.started,
+    ...(typeof d.managerUrl === "string" ? { managerUrl: d.managerUrl } : {}) };
   seats.set(venue.id, seat);
   // Mirror into this venue's runtime state (the global session when none is
   // registered) so the watcher/seat-poller and interactive tools see the seat.
@@ -334,9 +342,70 @@ function buildLeave({ c, base, cfg, venue }: BuildCtx): AnyAgentTool | null {
   });
 }
 
+function buildCreate({ c, base, cfg, venue, spec }: BuildCtx): AnyAgentTool | null {
+  const s = c.create; if (!s) return null;
+  return mkTool(s.tool, s.summary, paramsSchema(s.params ?? {}), async (_id, params) => {
+    // Same seating plumbing as join, but via the CREATE-ONLY route — never
+    // find-or-reseat (that's soccer_join / quickmatch). Config identity/join
+    // extras ride along identically.
+    const extra = { ...(cfg.join ?? {}), identity: identityOf(cfg) };
+    let seat;
+    try {
+      seat = await joinVenue(venue, spec, cfg,
+        { params: (params ?? {}) as Record<string, unknown>, extra, step: { route: s.route, ...(s.params ? { params: s.params } : {}), seat: s.seat } });
+    } catch (e) {
+      const status = e instanceof JoinError ? e.status : undefined;
+      const reauth = status === 401 ? ` Your credentials were rejected — run agentmessier_login to re-authenticate.` : "";
+      return ok({ ok: false, started: false, error: String(e instanceof Error ? e.message : e),
+        note: `ROOM NOT CREATED — you are NOT seated in a match. Do not describe joining a game.${reauth}` });
+    }
+    const delegated = !!(c.autoplay && (c.autoplay as { delegate?: boolean }).delegate) && !!stateOf(venue.id).startWatcher?.();
+    const watchUrl = `${base}/matches/${seat.id}/view`;
+    const next = delegated
+      ? `The watcher is now playing it — ${c.autoplay!.tool} off to take over manually.`
+      : `Then observe with ${c.observe.tool} and play with ${c.act.tool}${c.autoplay ? `, or ${c.autoplay.tool} on for hands-free play` : ""}.`;
+    return ok({ created: seat.id, yours: seat.controls, watchUrl, delegated,
+      note: `Created a fresh room and seated in ${seat.id}. TELL YOUR HUMAN they can watch live here: ${watchUrl}. ${next}` });
+  });
+}
+
+/** One generated tool per spec.client.extras row — a generic single-call REST
+ *  tool: substitute {matchId}/{did} from the current seat, attach the declared
+ *  extra credential ('seat' → x-agent-token rides authedFetch's token; 'manager'
+ *  → x-manager-key parsed from the join response's managerUrl #mk= fragment).
+ *  Adding a row server-side ships a new tool with zero plugin code changes. */
+function buildExtras({ c, base, cfg, venue }: BuildCtx): AnyAgentTool[] {
+  return (c.extras ?? []).map((s) => mkTool(s.tool, s.summary, paramsSchema(s.params ?? {}), async (_id, params) => {
+    const seat = seats.get(venue.id) ?? {};
+    const p = (params ?? {}) as Record<string, unknown>;
+    const matchId = typeof p["matchId"] === "string" && p["matchId"] ? (p["matchId"] as string) : seat.id;
+    if (!matchId && s.route.includes("{matchId}")) return ok({ error: `no match — join first (${c.join?.tool ?? "join"}), or pass matchId` });
+    const d = did(venue.id, cfg);
+    const path = sub(s.route, { matchId: matchId ?? "", did: d });
+    const method = (s.method ?? "GET").toUpperCase();
+    const headers: Record<string, string> = {};
+    if (s.auth === "manager") {
+      const mk = /[#?&]mk=([^&#]+)/.exec(seat.managerUrl ?? "")?.[1];
+      if (!mk) return ok({ error: `no manager key for this seat — the key arrives with the join response; rejoin (${c.join?.tool ?? "join"}) and retry` });
+      headers["x-manager-key"] = mk;
+    }
+    const bodyFields = { agentId: d, ...whitelist(p, s.params ?? {}) };
+    delete (bodyFields as Record<string, unknown>)["matchId"]; // routing, not a body field
+    const r = await vfetch(base, path, {
+      cfg, did: d, method,
+      ...(method !== "GET" ? { body: bodyFields } : {}),
+      ...(s.auth === "seat" && seat.token ? { token: seat.token } : {}),
+      ...(Object.keys(headers).length ? { headers } : {}),
+    });
+    if (!r.ok) return ok({ error: r.data?.error ?? `${s.tool} ${r.status}`, status: r.status });
+    return ok({ ...r.data });
+  }));
+}
+
 /** Ordered lifecycle — the emission order IS the agent-facing tool order. Adding a
- *  step = one builder + one row (mirrors hermes generate.py `_BUILDERS`). */
-const BUILDERS = [buildLobby, buildJoin, buildObserve, buildAct, buildAutoplay, buildSelfcheck, buildLeave];
+ *  step = one builder + one row (mirrors hermes generate.py `_BUILDERS`). The
+ *  spec-driven `extras` rows are appended after the lifecycle tools. */
+const BUILDERS = [buildLobby, buildJoin, buildCreate, buildObserve, buildAct, buildAutoplay, buildSelfcheck, buildLeave];
 
 /** Drop duplicate tool names (a venue prefix collision / dup registry row), keeping
  *  the first — registering two tools under one name is a host error. */
@@ -349,7 +418,7 @@ function dedup(tools: AnyAgentTool[]): AnyAgentTool[] {
 export function generateVenueTools(venue: Venue, spec: GameSpec, cfg: PluginCfg): AnyAgentTool[] {
   const c = spec.client; if (!c) return [];
   const ctx: BuildCtx = { venue, spec, cfg, base: venueUrl(venue.origin, cfg), c, enumList: spec.actions?.enum ?? [], descs: spec.actions?.descriptions ?? {} };
-  return dedup(BUILDERS.map(b => b(ctx)).filter((t): t is AnyAgentTool => !!t));
+  return dedup([...BUILDERS.map(b => b(ctx)), ...buildExtras(ctx)].filter((t): t is AnyAgentTool => !!t));
 }
 
 // ── discovery + offline fallback (mirrors generate.py) ────────────────────────
@@ -401,6 +470,18 @@ const DEFAULT_SPECS: Record<string, GameSpec> = {
       },
       autoplay: { tool: "soccer_autoplay", delegate: true, summary: "Hands-free play on/off." },
       leave: { tool: "soccer_leave", route: "/matches/{matchId}/leave", summary: "Leave your match (forfeit if live)." },
+      create: {
+        tool: "soccer_create", route: "/rooms",
+        params: { teamSize: { type: "integer" }, team: { type: "string" }, name: { type: "string" }, nation: { type: "string" }, clan: { type: "string" }, style: { type: "string" } },
+        seat: { id: "matchId", token: "token", controls: "playerIds" },
+        summary: "Create a BRAND-NEW room and take a side (never reuses/rejoins — that's soccer_join).",
+      },
+      extras: [
+        { tool: "soccer_result", method: "GET", route: "/matches/{matchId}/result", auth: "none", params: { matchId: { type: "string" } }, summary: "The final result of a match (score, winner, how it ended)." },
+        { tool: "soccer_set_identity", method: "POST", route: "/matches/{matchId}/identity", auth: "seat", params: { name: { type: "string" }, nation: { type: "string" }, clan: { type: "string" }, style: { type: "string" } }, summary: "Change your team identity mid-match (may cost credits for non-members)." },
+        { tool: "soccer_propose", method: "POST", route: "/matches/{matchId}/controls/propose", auth: "manager", params: { action: { type: "string", enum: ["pause", "resume", "reset", "config"] } }, summary: "Propose a room control (pause/resume/reset) — needs >70% owner approval." },
+        { tool: "soccer_approve", method: "POST", route: "/matches/{matchId}/controls/approve", auth: "manager", params: {}, summary: "Approve the pending room-control proposal." },
+      ],
     },
   },
   taskmarket: {
