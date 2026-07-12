@@ -33,6 +33,13 @@ export type PluginCfg = {
   autoJoin?: boolean;
   /** Optional: pin a specific room at startup (overrides autoJoin). */
   matchId?: string;
+  /** Startup seating goes through spec.client.create (always a brand-new room)
+   *  instead of the default quickmatch find-or-reseat. For a host that always
+   *  wants a fresh game on boot — e.g. the e2e smoke test, which otherwise gets
+   *  re-seated into whatever room its persistent test DID last held (a stale
+   *  reused match, not a genuinely fresh install/join path). Ignored if the
+   *  venue's spec has no client.create (falls back to autoJoin's quickmatch). */
+  createOnBoot?: boolean;
   /** Reconnect-on-boot: on startup, probe the venue's resume route and rejoin an
    *  in-progress match if the server still has us seated (default ON — a gateway
    *  restart mid-match resumes the SAME game instead of going idle). Set false to

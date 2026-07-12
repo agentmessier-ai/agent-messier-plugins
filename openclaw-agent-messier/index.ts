@@ -256,8 +256,14 @@ async function startVenueWatcher(
         // never joined for the rest of the process's life. Retried in the
         // BACKGROUND (not awaited) so it never blocks preflight below; backoff
         // 15s → cap 60s; `stopping` lets service stop() cancel it cleanly.
+        // createOnBoot: seat via spec.client.create (always brand-new) instead
+        // of quickmatch's find-or-reseat — only meaningful when cfg.matchId
+        // ISN'T pinning a specific room (create has no matchId concept).
+        const createStep = spec.client?.create;
         const seatOnce = () => cfg.matchId
           ? joinVenue(venue, spec, cfg, { matchId: cfg.matchId, extra: joinExtra() })
+          : cfg.createOnBoot && createStep
+          ? joinVenue(venue, spec, cfg, { extra: joinExtra(), step: { route: createStep.route, ...(createStep.params ? { params: createStep.params } : {}), seat: createStep.seat } })
           : joinVenue(venue, spec, cfg, { extra: joinExtra() });
         void (async () => {
           let delayMs = 15_000;
