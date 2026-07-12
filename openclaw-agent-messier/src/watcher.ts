@@ -42,6 +42,10 @@ export type CadenceCfg = {
    *  no auth at all). Optional so existing test call-sites keep compiling;
    *  omitting it just means the poll goes out unauthenticated, as before. */
   cfg?: PluginCfg;
+  /** Venue id for log lines (default "agent-soccer" — the literal every log
+   *  used to hardcode, which mislabeled golf's errors as soccer's and sent a
+   *  live debugging session down the wrong venue entirely, 2026-07-12). */
+  label?: string;
 };
 
 export type CadenceOptions = {
@@ -103,6 +107,7 @@ export function jittered(ms: number): number {
  */
 export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptions): Promise<void> {
   const { signal, logger } = options;
+  const label = cfg.label ?? "agent-soccer";
   const state = options.state ?? session;
   const base = (cfg.serverUrl ?? "https://www.agentmessier.com").replace(/\/$/, "");
 
@@ -147,7 +152,7 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
       if (r.status === 404) {
         // Server forgot us (restart) or the room is gone — re-claim, then poll again.
         if (options.onReclaim) {
-          try { await options.onReclaim(); } catch (e) { logger?.warn(`[agent-soccer] re-claim failed: ${String(e)}`); }
+          try { await options.onReclaim(); } catch (e) { logger?.warn(`[${label}] re-claim failed: ${String(e)}`); }
         }
         await wait(jittered(cadence), signal);
         continue;
@@ -157,14 +162,14 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
         // `view` null with no log and no failure counting, so a persistent
         // auth/server error looked identical to a quiet, healthy match — the
         // exact silent-failure class onNetworkError exists to catch.
-        logger?.warn(`[agent-soccer] state poll returned ${r.status}: ${JSON.stringify(r.data)}`);
+        logger?.warn(`[${label}] state poll returned ${r.status}: ${JSON.stringify(r.data)}`);
         if (options.onNetworkError) { try { await options.onNetworkError(); } catch { /* diagnosis must never break the loop */ } }
       } else {
         view = r.data as TeamView & { summary?: string };
       }
     } catch (e) {
       if (signal?.aborted) return;
-      logger?.warn(`[agent-soccer] state poll failed: ${String(e)}`);
+      logger?.warn(`[${label}] state poll failed: ${String(e)}`);
       if (options.onNetworkError) { try { await options.onNetworkError(); } catch { /* diagnosis must never break the loop */ } }
     }
 
@@ -174,9 +179,9 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
       // with autoJoin — one match per boot is the intended behavior) so the
       // agent doesn't keep polling a dead room forever (which also blocks the
       // lobby seat-poller from adopting the pitch's next warmup match).
-      logger?.info(`[agent-soccer] match ${cfg.matchId} ended — releasing seat`);
+      logger?.info(`[${label}] match ${cfg.matchId} ended — releasing seat`);
       if (options.onEnded) {
-        try { await options.onEnded(); } catch (e) { logger?.warn(`[agent-soccer] onEnded failed: ${String(e)}`); }
+        try { await options.onEnded(); } catch (e) { logger?.warn(`[${label}] onEnded failed: ${String(e)}`); }
       }
       return;
     }
@@ -187,7 +192,7 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
       try {
         await options.play(view, spec);
       } catch (e) {
-        logger?.error(`[agent-soccer] play failed: ${String(e)}`);
+        logger?.error(`[${label}] play failed: ${String(e)}`);
       }
     }
 

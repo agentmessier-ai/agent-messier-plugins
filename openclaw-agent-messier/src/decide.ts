@@ -325,8 +325,13 @@ function syncHistoryMatch(matchId: string): void {
 }
 
 function boardBrief(v: TeamView): string {
-  const o = v.ball.owner ?? "loose";
-  return `t${v.tick} ${v.score.home}-${v.score.away} ball@(${v.ball.pos.x.toFixed(0)},${v.ball.pos.y.toFixed(0)}) ${o}`;
+  // Not every venue's view is soccer-shaped: golf has no `ball` at all. An
+  // unguarded read here crashed playTurn AFTER the LLM call every golf tick
+  // (found live 2026-07-12 — a token-burning crash loop), so guard each
+  // soccer-specific field and degrade to whatever is present.
+  const score = v.score ? ` ${v.score.home}-${v.score.away}` : "";
+  const ball = v.ball?.pos ? ` ball@(${v.ball.pos.x.toFixed(0)},${v.ball.pos.y.toFixed(0)}) ${v.ball.owner ?? "loose"}` : "";
+  return `t${v.tick}${score}${ball}`;
 }
 
 function summarizeMoves(moves: Move[]): string {

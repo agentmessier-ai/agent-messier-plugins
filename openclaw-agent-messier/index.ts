@@ -169,7 +169,7 @@ async function startVenueWatcher(
         const sig = controller.signal;
         const effectiveCadence = cadenceMs ?? cfg.cadenceMs;
         void startCadenceWatcher(
-          { serverUrl: cfg.serverUrl, matchId, agentId, cfg, ...(effectiveCadence !== undefined ? { cadenceMs: effectiveCadence } : {}) },
+          { serverUrl: cfg.serverUrl, matchId, agentId, cfg, label, ...(effectiveCadence !== undefined ? { cadenceMs: effectiveCadence } : {}) },
           {
             signal: sig,
             logger: ctx.logger,
