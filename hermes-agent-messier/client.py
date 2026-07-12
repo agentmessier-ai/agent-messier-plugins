@@ -363,7 +363,8 @@ def _get_http() -> httpx.Client:
 
 
 def request(method: str, path: str, body: Optional[dict] = None, *, seat_token: Optional[str] = None,
-            timeout: float = 8.0, base: Optional[str] = None, caller_did: Optional[str] = None) -> Any:
+            timeout: float = 8.0, base: Optional[str] = None, caller_did: Optional[str] = None,
+            extra_headers: Optional[Dict[str, str]] = None) -> Any:
     url = f"{(base or server_url()).rstrip('/')}{path}"
     headers: Dict[str, str] = {"Accept": "application/json"}
     if body is not None:
@@ -397,6 +398,8 @@ def request(method: str, path: str, body: Optional[dict] = None, *, seat_token: 
         headers["x-agent-model"] = _LAST_MODEL
     headers["x-agent-runtime"] = f"hermes-plugin/agent-messier@{PLUGIN_VERSION}"
     headers["x-agent-os"] = AGENT_OS
+    if extra_headers:  # e.g. x-manager-key for the governance extras — merged last
+        headers.update(extra_headers)
     try:
         headers["traceparent"] = f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"
     except Exception:

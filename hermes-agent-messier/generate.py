@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import client as C
@@ -168,6 +169,10 @@ def _join_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, A
                 "controls": r.get(seat_map["controls"], []),
                 "agentId": r.get("did") or C.team_handle(),
                 "origin": venue.get("origin", "pitch")}
+        # The manager console URL's #mk= fragment is the manager key the
+        # governance extras (propose/approve) authenticate with — keep it.
+        if isinstance(r.get("managerUrl"), str):
+            seat["managerUrl"] = r["managerUrl"]
         # Defensive: a 2xx that yields no usable match id is NOT a real join — never
         # report success, and never save a phantom seat.
         if not seat["id"]:
@@ -407,6 +412,16 @@ DEFAULT_SPECS: Dict[str, Dict[str, Any]] = {
             "act": {"tool": "soccer_play", "params": {"player": {"type": "string"}, "dir": {"type": "array", "items": {"type": "number"}}, "distance": {"type": "number"}, "power": {"type": "number"}, "say": {"type": "string"}}, "summary": "Order a player."},
             "autoplay": {"tool": "soccer_autoplay", "summary": "Hands-free play on/off."},
             "leave": {"tool": "soccer_leave", "route": "/matches/{matchId}/leave", "summary": "Leave your match (forfeit if live — opponent wins). Frees you to join another room."},
+            "create": {"tool": "soccer_create", "route": "/rooms",
+                       "params": {"teamSize": {"type": "integer"}, "team": {"type": "string"}, "name": {"type": "string"}, "nation": {"type": "string"}, "clan": {"type": "string"}, "style": {"type": "string"}},
+                       "seat": {"id": "matchId", "token": "token", "controls": "playerIds"},
+                       "summary": "Create a BRAND-NEW room and take a side (never reuses/rejoins — that's soccer_join)."},
+            "extras": [
+                {"tool": "soccer_result", "method": "GET", "route": "/matches/{matchId}/result", "auth": "none", "params": {"matchId": {"type": "string"}}, "summary": "The final result of a match (score, winner, how it ended)."},
+                {"tool": "soccer_set_identity", "method": "POST", "route": "/matches/{matchId}/identity", "auth": "seat", "params": {"name": {"type": "string"}, "nation": {"type": "string"}, "clan": {"type": "string"}, "style": {"type": "string"}}, "summary": "Change your team identity mid-match (may cost credits for non-members)."},
+                {"tool": "soccer_propose", "method": "POST", "route": "/matches/{matchId}/controls/propose", "auth": "manager", "params": {"action": {"type": "string", "enum": ["pause", "resume", "reset", "config"]}}, "summary": "Propose a room control (pause/resume/reset) — needs >70% owner approval."},
+                {"tool": "soccer_approve", "method": "POST", "route": "/matches/{matchId}/controls/approve", "auth": "manager", "params": {}, "summary": "Approve the pending room-control proposal."},
+            ],
         },
     },
     "taskmarket": {
@@ -604,9 +619,60 @@ def _build_leave(venue: Dict[str, Any], spec: Dict[str, Any], c: Dict[str, Any])
     return _simple_tool(venue, spec, s, _leave_handler(venue, spec, s), "🚪") if s else None
 
 
+def _build_create(venue: Dict[str, Any], spec: Dict[str, Any], c: Dict[str, Any]) -> Optional[Tool]:
+    # CREATE-ONLY twin of join (2026-07-12): the step's route always makes a
+    # brand-new room (never find-or-reseat). _join_handler works verbatim — the
+    # step has no seatRoute/matchId, so it POSTs step["route"] and saves the
+    # seat identically.
+    s = c.get("create")
+    if not s:
+        return None
+    return (s["tool"], _schema(s["tool"], s.get("summary", ""), s.get("params", {})),
+            _safe(s["tool"], _join_handler(venue, spec, s)), "🆕")
+
+
+def _extra_handler(venue: Dict[str, Any], spec: Dict[str, Any], step: Dict[str, Any]) -> Callable[..., str]:
+    """Generic one-call REST tool from a spec.client.extras row: {matchId}/{did}
+    substituted from the current seat; per-row auth ('seat' → x-agent-token,
+    'manager' → x-manager-key parsed from the join response's managerUrl #mk=)."""
+    def handler(args: Dict[str, Any], **_: Any) -> str:
+        seat = C.load_seat(venue["id"]) or {}
+        mid = args.get("matchId") or seat.get("id")
+        if "{matchId}" in step["route"] and not mid:
+            join_tool = ((spec.get("client") or {}).get("join") or {}).get("tool", "join")
+            return T._err(f"no match — join first ({join_tool}), or pass matchId")
+        path = _sub(step["route"], matchId=str(mid or ""), did=seat.get("agentId") or C.team_handle())
+        method = str(step.get("method") or "GET").upper()
+        extra_headers: Dict[str, str] = {}
+        if step.get("auth") == "manager":
+            m = re.search(r"[#?&]mk=([^&#]+)", str(seat.get("managerUrl") or ""))
+            if not m:
+                return T._err("no manager key for this seat — the key arrives with the join response; rejoin and retry")
+            extra_headers["x-manager-key"] = m.group(1)
+        body = None
+        if method != "GET":
+            body = {"agentId": C.team_handle(),
+                    **{k: v for k, v in _whitelist(args, step.get("params", {})).items() if k != "matchId"}}
+        try:
+            r = C.request(method, path, body, base=_base(venue), caller_did=C.team_handle(),
+                          seat_token=seat.get("token") if step.get("auth") == "seat" else None,
+                          extra_headers=extra_headers or None)
+        except C.PitchError as e:
+            return T._err(f"{step['tool']} failed: {e}", status=e.status)
+        return T._ok(r if isinstance(r, dict) else {"result": r})
+    return handler
+
+
+def _extras_tools(venue: Dict[str, Any], spec: Dict[str, Any], c: Dict[str, Any]) -> List[Tool]:
+    return [(s["tool"], _schema(s["tool"], s.get("summary", ""), s.get("params", {})),
+             _safe(s["tool"], _extra_handler(venue, spec, s)), "🧩")
+            for s in (c.get("extras") or [])]
+
+
 # Ordered lifecycle — the emission order IS the agent-facing tool order. Adding a
 # step = one builder + one row here; no new branches in generate_venue_tools.
-_BUILDERS = [_build_lobby, _build_join, _build_observe, _build_act, _build_autoplay, _build_selfcheck, _build_leave]
+# The spec-driven `extras` rows are appended after the lifecycle tools.
+_BUILDERS = [_build_lobby, _build_join, _build_create, _build_observe, _build_act, _build_autoplay, _build_selfcheck, _build_leave]
 
 
 def _dedup(tools: List[Tool]) -> List[Tool]:
@@ -631,4 +697,4 @@ def generate_venue_tools(venue: Dict[str, Any], spec: Dict[str, Any]) -> List[To
     if not c or not isinstance(spec.get("routes"), dict):
         logger.debug("venue %s: spec missing client/routes — skipped", venue.get("id"))
         return []
-    return _dedup([t for t in (b(venue, spec, c) for b in _BUILDERS) if t])
+    return _dedup([t for t in (b(venue, spec, c) for b in _BUILDERS) if t] + _extras_tools(venue, spec, c))
