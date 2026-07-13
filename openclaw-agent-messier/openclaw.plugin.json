@@ -68,6 +68,10 @@
       "label": "mTLS client key (optional)",
       "placeholder": "~/.config/agentmessier/client.key",
       "help": "Path to the private key PEM matching clientCertPath."
+    },
+    "debug": {
+      "label": "Debug logging (optional)",
+      "help": "Verbose autoplay logging: per-tick stage lines (poll → llm → act) with timings plus a periodic alive heartbeat. The loop-stall watchdog warns regardless of this flag."
     }
   },
   "configSchema": {
@@ -85,7 +89,8 @@
       "identity": { "type": "object", "additionalProperties": true },
       "join": { "type": "object", "additionalProperties": true },
       "clientCertPath": { "type": "string" },
-      "clientKeyPath": { "type": "string" }
+      "clientKeyPath": { "type": "string" },
+      "debug": { "type": "boolean" }
     },
     "required": []
   }

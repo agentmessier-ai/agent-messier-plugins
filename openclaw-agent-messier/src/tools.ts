@@ -73,6 +73,14 @@ export type PluginCfg = {
    *  cert (a clear warning is logged, play is never blocked by this). */
   clientCertPath?: string;
   clientKeyPath?: string;
+  /** Verbose autoplay logging: per-tick stage lines (poll → llm → act → report)
+   *  with timings, plus a periodic alive heartbeat. Default off — the hot path
+   *  stays silent when healthy. The loop-stall WATCHDOG (warns when a tick stops
+   *  progressing, naming the stuck stage) is always on regardless of this flag:
+   *  a frozen loop must never be indistinguishable from a healthy idle one
+   *  (cost of learning that the hard way: a live e2e hang, 2026-07-13, whose
+   *  only "evidence" was the absence of output). */
+  debug?: boolean;
 };
 
 export function identityOf(cfg: PluginCfg): Record<string, unknown> {

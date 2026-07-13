@@ -638,7 +638,9 @@ export async function playTurn(deps: PlayTurnDeps): Promise<PlayTurnResult> {
   syncHistoryMatch(deps.matchId);
   const { system, user } = buildMessages(deps.view, { mode: deps.mode, strategyFile: deps.strategyFile, spec: deps.spec });
 
+  const debug = deps.cfg.debug === true;
   const started = Date.now();
+  if (debug) deps.logger?.info(`turn start: tick=${deps.view.tick} clock=${deps.view.clock} — calling llm`);
   let text = "";
   try {
     // Race against a hard timeout, NOT just an AbortSignal: the host's llm.complete
@@ -669,6 +671,7 @@ export async function playTurn(deps: PlayTurnDeps): Promise<PlayTurnResult> {
     deps.logger?.warn(`llm complete failed: ${String(e)}`);
   }
   const latencyMs = Math.max(0, Date.now() - started);
+  if (debug) deps.logger?.info(`llm done in ${latencyMs}ms (${state.lastModel ?? "model unknown"}, ${text.length} chars)`);
 
   let moves: Move[] | null = null;
   let reason: string | undefined;
@@ -680,7 +683,7 @@ export async function playTurn(deps: PlayTurnDeps): Promise<PlayTurnResult> {
 
   let posted = 0;
   if (moves) {
-    ({ posted } = await executeMoves(deps.matchId, moves, {
+    const { posted: p, results } = await executeMoves(deps.matchId, moves, {
       base: deps.base,
       cfg: deps.cfg,
       routes: deps.spec?.routes,
@@ -689,7 +692,17 @@ export async function playTurn(deps: PlayTurnDeps): Promise<PlayTurnResult> {
       decisionMs: latencyMs,
       state,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
-    }));
+    });
+    posted = p;
+    // Rejected action POSTs were previously DISCARDED here (only the count
+    // survived) — a turn where every move 4xx'd looked identical to a fully
+    // successful one in the logs. Surface them always, not just in debug.
+    const failed = results.filter((r) => r.status < 200 || r.status >= 300);
+    if (failed.length) {
+      deps.logger?.warn(`${failed.length}/${results.length} action POSTs rejected: ${failed.map((f) => `${f.playerId}=${f.status}`).join(", ")}`);
+    } else if (debug) {
+      deps.logger?.info(`acted: ${results.length} move(s) posted ok`);
+    }
     recordTurn(deps.view, moves);
   }
 

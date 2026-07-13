@@ -100,6 +100,15 @@ export function jittered(ms: number): number {
   return ms * (0.85 + Math.random() * 0.3);
 }
 
+/** Watchdog cadence + stall threshold. The watchdog is a timer OUTSIDE the loop
+ *  body, so it keeps firing even when the loop itself is frozen on an await —
+ *  the one failure mode in-loop logging can never report on (every log call
+ *  lives inside the loop, so a hang and a healthy quiet match used to produce
+ *  identical output: none. Found live 2026-07-13; hours of e2e debugging came
+ *  down to exactly this blind spot). Exported for the test's fake timers. */
+export const WATCHDOG_INTERVAL_MS = 30_000;
+export const WATCHDOG_STALL_MS = 60_000;
+
 /**
  * Run the cadence loop until aborted. Each tick: poll state → guard → play →
  * wait(cadence). A 404 triggers onReclaim; an ended/empty view is skipped (no
@@ -110,6 +119,7 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
   const label = cfg.label ?? "agent-soccer";
   const state = options.state ?? session;
   const base = (cfg.serverUrl ?? "https://www.agentmessier.com").replace(/\/$/, "");
+  const debug = cfg.cfg?.debug === true;
 
   // The venue's spec (from discovery/baked) is authoritative for routes; prefer
   // it. Only fall back to a per-match re-fetch when no venue spec was supplied
@@ -117,8 +127,35 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
   let spec: GameSpec | null = options.spec ?? await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId);
   const cadence = Math.max(MIN_CADENCE_MS, cfg.cadenceMs ?? spec?.observe?.suggestedIntervalMs ?? DEFAULT_CADENCE_MS);
 
+  // Stage tracking + watchdog: `stage` is updated before every await in the
+  // loop, and the watchdog interval fires INDEPENDENTLY of the loop — so when
+  // the loop freezes on any of those awaits, the watchdog still runs and can
+  // say exactly which stage it froze in and for how long. With debug on, it
+  // also emits a periodic alive heartbeat while healthy.
+  let tick = 0;
+  let stage = "starting";
+  let stageSince = Date.now();
+  const setStage = (s: string) => { stage = s; stageSince = Date.now(); };
+  const watchdog = setInterval(() => {
+    const inStageMs = Date.now() - stageSince;
+    // "wait" is exempt from the stall warning: cadenceMs has a floor but no
+    // ceiling, so a long configured cadence makes a long wait legitimate.
+    if (inStageMs > WATCHDOG_STALL_MS && stage !== "wait") {
+      logger?.warn(`[${label}] loop STALLED — stuck in "${stage}" for ${Math.round(inStageMs / 1000)}s (tick ${tick}, match ${cfg.matchId})`);
+    } else if (debug) {
+      logger?.info(`[${label}] alive — tick ${tick}, stage "${stage}" (${Math.round(inStageMs / 1000)}s)`);
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  // Don't let the watchdog keep the host process alive on its own (plugin
+  // runs inside the long-lived gateway; this only matters for tests/edge).
+  (watchdog as { unref?: () => void }).unref?.();
+  signal?.addEventListener("abort", () => clearInterval(watchdog), { once: true });
+
+  try {
   while (true) {
     if (signal?.aborted) return;
+    tick++;
+    setStage("spec-fetch");
     if (spec === null) {
       spec = await fetchMatchSpec({ serverUrl: cfg.serverUrl } as PluginCfg, cfg.matchId).catch(() => null);
     }
@@ -137,6 +174,7 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
     }
 
     let view: (TeamView & { summary?: string }) | null = null;
+    setStage("state-poll");
     try {
       const agentId = state.did ?? cfg.agentId;
       // Authed poll (previously this went out with NO auth headers at all —
@@ -189,13 +227,23 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
     if (view && Array.isArray(view.mine)) {
       // The view is authoritative for which players we control.
       state.players = view.mine.map((p) => p.id);
+      setStage("play");
+      if (debug) logger?.info(`[${label}] tick ${tick}: playing (phase=${String(view.phase ?? "?")}, mine=${view.mine.length})`);
+      const playStarted = Date.now();
       try {
         await options.play(view, spec);
+        if (debug) logger?.info(`[${label}] tick ${tick}: play done in ${Date.now() - playStarted}ms`);
       } catch (e) {
         logger?.error(`[${label}] play failed: ${String(e)}`);
       }
+    } else if (debug) {
+      logger?.info(`[${label}] tick ${tick}: no playable view (skipped)`);
     }
 
+    setStage("wait");
     await wait(jittered(cadence), signal);
+  }
+  } finally {
+    clearInterval(watchdog);
   }
 }
