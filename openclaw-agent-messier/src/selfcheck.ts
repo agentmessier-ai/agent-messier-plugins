@@ -15,6 +15,7 @@
  */
 import { fetchMatchSpec, type GameSpec, type PluginCfg } from "./tools.js";
 import { stateUrl } from "./watcher.js";
+import { authedFetch } from "./http.js";
 import type { Diagnosis, RuntimeSession } from "./state.js";
 import type { LlmComplete } from "./decide.js";
 
@@ -40,12 +41,16 @@ export type PreflightDeps = {
   fetch?: typeof fetch;
 };
 
-async function checkServer(base: string, f: typeof fetch): Promise<Check> {
+// checkServer/checkSeat go through authedFetch (mTLS dispatcher + request
+// timeout + auth headers), not raw `fetch` — the raw call used here previously
+// bypassed the client cert entirely, so a Cloudflare-mTLS-gated venue (staging)
+// always came back 403 on /health, misreporting a healthy server as degraded
+// (found live, 2026-07-12, alongside an unrelated e2e investigation).
+async function checkServer(base: string, cfg: PluginCfg, agentId: string, f?: typeof fetch): Promise<Check> {
   try {
-    const res = await f(`${base}/health`, { headers: { Accept: "application/json" } });
-    if (!res.ok) return { name: "server", ok: false, detail: `GET /health ${res.status}` };
-    const body = (await res.json()) as { ok?: boolean };
-    return body?.ok === true
+    const r = await authedFetch(base, "/health", { cfg, did: agentId, ...(f ? { fetchImpl: f } : {}) });
+    if (!r.ok) return { name: "server", ok: false, detail: `GET /health ${r.status}` };
+    return r.data?.ok === true
       ? { name: "server", ok: true, detail: "GET /health 200" }
       : { name: "server", ok: false, detail: "GET /health: unexpected response" };
   } catch (e) {
@@ -65,17 +70,17 @@ function checkVenue(spec: GameSpec | null): Check {
   return { name: "venue", ok: true, detail: `spec v${sv} rules${rules}` };
 }
 
-async function checkSeat(base: string, spec: GameSpec | null, state: RuntimeSession, agentId: string, f: typeof fetch): Promise<Check> {
+async function checkSeat(base: string, spec: GameSpec | null, cfg: PluginCfg, state: RuntimeSession, agentId: string, f?: typeof fetch): Promise<Check> {
   if (!state.matchId) return { name: "seat", ok: true, detail: "n/a — not seated" };
   const did = state.did ?? agentId;
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (state.token) headers["x-agent-token"] = state.token;
   try {
-    const res = await f(`${base}${stateUrl(spec, state.matchId, did)}`, { headers });
-    if (res.ok) return { name: "seat", ok: true, detail: "state 200" };
-    if (res.status === 404) return { name: "seat", ok: false, detail: "seat/match gone (404)" };
-    if (res.status === 401) return { name: "seat", ok: false, detail: "bad/missing seat token (401)" };
-    return { name: "seat", ok: false, detail: `state ${res.status}` };
+    const r = await authedFetch(base, stateUrl(spec, state.matchId, did), {
+      cfg, did, token: state.token, state, ...(f ? { fetchImpl: f } : {}),
+    });
+    if (r.ok) return { name: "seat", ok: true, detail: "state 200" };
+    if (r.status === 404) return { name: "seat", ok: false, detail: "seat/match gone (404)" };
+    if (r.status === 401) return { name: "seat", ok: false, detail: "bad/missing seat token (401)" };
+    return { name: "seat", ok: false, detail: `state ${r.status}` };
   } catch (e) {
     return { name: "seat", ok: false, detail: `unreachable: ${String(e)}`.slice(0, 160) };
   }
@@ -103,14 +108,13 @@ async function checkModel(complete: LlmComplete | null, fallbackModel?: string):
  * `state` is degraded iff any non-n/a check fails; `reason` is the first failure.
  */
 export async function preflight(deps: PreflightDeps): Promise<Diagnosis> {
-  const f = deps.fetch ?? fetch;
   const base = deps.base.replace(/\/$/, "");
   let spec = deps.spec ?? null;
   if (!spec) spec = await fetchMatchSpec({ serverUrl: deps.cfg.serverUrl } as PluginCfg, deps.state.matchId ?? "").catch(() => null);
 
   const [server, seat, model] = await Promise.all([
-    checkServer(base, f),
-    checkSeat(base, spec, deps.state, deps.agentId, f),
+    checkServer(base, deps.cfg, deps.agentId, deps.fetch),
+    checkSeat(base, spec, deps.cfg, deps.state, deps.agentId, deps.fetch),
     checkModel(deps.complete, deps.fallbackModel),
   ]);
   const venue = checkVenue(spec);
