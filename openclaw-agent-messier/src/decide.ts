@@ -392,6 +392,13 @@ export function buildMessages(v: TeamView & { summary?: string }, opts: BuildMes
 
 // ── direct LLM completion (the SDK contract a plugin can call) ────────────────
 
+/** Hard ceiling on one completion call — see the Promise.race in playTurn for why
+ *  this exists (a hung host-side llm.complete otherwise freezes the whole
+ *  autoplay loop forever, with zero further log output). Generous relative to
+ *  http.ts's 15s pitch-request timeout: a real LLM completion can legitimately
+ *  take longer than a plain HTTP round trip. */
+const COMPLETE_TIMEOUT_MS = 45_000;
+
 /** Matches `api.runtime.llm.complete` — one prompt → text, with provider/model
  *  echoed back so we can record the effective model reliably. */
 export type LlmComplete = (params: {
@@ -634,13 +641,27 @@ export async function playTurn(deps: PlayTurnDeps): Promise<PlayTurnResult> {
   const started = Date.now();
   let text = "";
   try {
-    const r = await deps.complete({
-      messages: [{ role: "user", content: user }],
-      ...(system ? { systemPrompt: system } : {}),
-      maxTokens: 500,
-      purpose: "agent-soccer autoplay",
-      ...(deps.signal ? { signal: deps.signal } : {}),
-    });
+    // Race against a hard timeout, NOT just an AbortSignal: the host's llm.complete
+    // is outside this plugin's control, and there is no guarantee it actually
+    // honors an abort internally (e.g. cancels the underlying provider request).
+    // Found live (2026-07-13): a stuck completion call left `await options.play(...)`
+    // in watcher.ts's while(true) loop unresolved forever — every subsequent
+    // state poll, act, and report froze with it, producing total silence
+    // indistinguishable from a healthy idle match. Racing a plain timer
+    // guarantees THIS await returns even if the orphaned real call keeps running.
+    const r = await Promise.race([
+      deps.complete({
+        messages: [{ role: "user", content: user }],
+        ...(system ? { systemPrompt: system } : {}),
+        maxTokens: 500,
+        purpose: "agent-soccer autoplay",
+        ...(deps.signal ? { signal: deps.signal } : {}),
+      }),
+      new Promise<never>((_, reject) => {
+        const t = setTimeout(() => reject(new Error(`llm complete timed out after ${COMPLETE_TIMEOUT_MS}ms`)), COMPLETE_TIMEOUT_MS);
+        deps.signal?.addEventListener("abort", () => clearTimeout(t), { once: true });
+      }),
+    ]);
     text = r.text ?? "";
     // Capture the effective provider/model from the RESULT (reliable, no hook).
     if (r.model) state.lastModel = r.provider ? `${r.provider}/${r.model}` : r.model;
