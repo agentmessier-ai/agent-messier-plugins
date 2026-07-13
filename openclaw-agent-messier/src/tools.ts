@@ -218,17 +218,21 @@ export function secureReadJson<T>(path: string): T | null {
 function cachePath(kind: string, key: string): string {
   return cacheFilePath(`${kind}-${key}`);
 }
-export function rememberToken(cfg: PluginCfg, token: string): void {
-  session.token = token;
-  secureWriteJson(cachePath("token", idKey(cfg)), { token });
-}
-export function recallToken(cfg: PluginCfg): string | null {
-  if (session.token) return session.token;
-  const t = secureReadJson<{ token?: string }>(cachePath("token", idKey(cfg)))?.token;
-  if (typeof t === "string") { session.token = t; return t; }
-  return null;
+/** Persist a venue's seat token to the secure cache — VENUE-SCOPED, and never
+ *  touches any runtime session. It used to also write `session.token` (the
+ *  GLOBAL session — which the first realtime venue uses as its own state), so
+ *  whichever venue joined LAST clobbered the first venue's live seat token:
+ *  golf's boot-join overwrote soccer's token ~0.6s after soccer seated, and
+ *  every subsequent soccer act presented golf's `gt-…` token → 401 forever
+ *  (root cause of the "parallel e2e freeze", proven live 2026-07-13). The
+ *  joining code writes the venue's OWN state (`stateOf(venue.id).token`)
+ *  right after calling this, which is the only in-memory copy needed. */
+export function rememberToken(cfg: PluginCfg, venueId: string, token: string): void {
+  secureWriteJson(cachePath("token", `${idKey(cfg)}-${venueId}`), { token });
 }
 export function rememberDid(cfg: PluginCfg, did: string): void {
+  // Unlike seat tokens, the DID is one-per-agent — identical across venues —
+  // so the global session write is safe (every venue resolves the same value).
   session.did = did;
   secureWriteJson(cachePath("did", idKey(cfg)), { did });
 }

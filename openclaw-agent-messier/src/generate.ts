@@ -122,7 +122,7 @@ export async function joinVenue(
   if (!r.ok) throw new JoinError(`join ${venue.id}: ${r.status} ${JSON.stringify(r.data)}`, r.status);
   const d = r.data;
   if (typeof d.did === "string") rememberDid(cfg, d.did);     // cross-process identity
-  if (typeof d.token === "string") rememberToken(cfg, d.token); // cross-process seat token
+  if (typeof d.token === "string") rememberToken(cfg, venue.id, d.token); // venue-scoped cache (never the global session)
   // A rejoin via seatRoute already KNOWS the room (it's in the URL), so the
   // server's response omits it — fall back to the matchId we joined with, or
   // seat.id ends up undefined and the observe loop hits /…//… → 404 → reclaim.
@@ -164,7 +164,7 @@ export async function resumeVenue(venue: Venue, spec: GameSpec, cfg: PluginCfg):
   const d = r.data;
   if (!d || d[sm.id] == null) return null; // {matchId:null} → not seated anywhere
   if (typeof d.did === "string") rememberDid(cfg, d.did);
-  if (typeof d.token === "string") rememberToken(cfg, d.token);
+  if (typeof d.token === "string") rememberToken(cfg, venue.id, d.token);
   const seat: Seat = { id: d[sm.id], token: d[sm.token], controls: d[sm.controls] ?? [], agentId: d.did ?? meId, started: d.started };
   seats.set(venue.id, seat);
   const st = stateOf(venue.id);
