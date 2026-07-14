@@ -563,6 +563,29 @@ export async function defaultVenueTools(cfg: PluginCfg): Promise<AnyAgentTool[]>
   return out;
 }
 
+/** SYNCHRONOUS venue tools from the disk cache or the baked DEFAULT_SPECS — NO
+ *  network. This exists because OpenClaw snapshots a plugin's tool surface at
+ *  registration time: a tool registered later (from inside a service's async
+ *  start(), which is where the live-spec `defaultVenueTools` above runs) is
+ *  visible to `tools.catalog` but NEVER reaches the agent's callable tool list
+ *  (`tools.effective`) — found live 2026-07-14: soccer_join/soccer_create et al.
+ *  were registered but the agent couldn't call them and fell back to raw curl
+ *  against the pitch API. So the venue tools MUST be registered synchronously at
+ *  the plugin's top level (like venues/login/claim already are). The spec those
+ *  tools are generated from is the same fetch→cache→baked chain loadVenueSpec
+ *  uses, minus the fetch: cache first (last live spec), then the baked default,
+ *  so a first-run-ever host with no cache still gets a full, correct tool set
+ *  from DEFAULT_SPECS. start() later re-registers from the LIVE spec (idempotent
+ *  — same tool ids), so any server-side spec change is still picked up. */
+export function defaultVenueToolsSync(cfg: PluginCfg): AnyAgentTool[] {
+  const out: AnyAgentTool[] = [];
+  for (const v of DEFAULT_VENUES) {
+    const spec = secureReadJson<GameSpec>(cacheFilePath(`spec-${v.id}`)) ?? DEFAULT_SPECS[v.id] ?? null;
+    if (spec?.client) out.push(...generateVenueTools(v, spec, cfg));
+  }
+  return out;
+}
+
 /** Does a spec describe a venue the autoplay watcher can drive? It must stream
  *  observations, seat the agent (players to control), and offer hands-free play.
  *  Soccer qualifies; the seatless poll-based taskmarket does not. */

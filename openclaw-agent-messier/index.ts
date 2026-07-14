@@ -1,6 +1,6 @@
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { venuesTool, agentmessierClaimTool, agentIdOf, identityOf, venueUrl, type PluginCfg, type GameSpec } from "./src/tools.js";
-import { defaultVenueTools, defaultRealtimeVenues, joinVenue, resumeVenue, setVenueState, type Venue } from "./src/generate.js";
+import { defaultVenueTools, defaultVenueToolsSync, defaultRealtimeVenues, joinVenue, resumeVenue, setVenueState, type Venue } from "./src/generate.js";
 import { startCadenceWatcher } from "./src/watcher.js";
 import { session, createSession, type RuntimeSession } from "./src/state.js";
 import { playTurn, playTurnViaSubagent, type LlmComplete } from "./src/decide.js";
@@ -41,11 +41,23 @@ export default function register(api: OpenClawPluginApi) {
   // when the llm_output hook doesn't capture one (older openclaw / subagent path).
   const fallbackModel = (api.config as { agents?: { defaults?: { model?: { primary?: string } } } })?.agents?.defaults?.model?.primary;
 
-  // Tools + autoplay watchers both depend on the venue spec (loaded async from the
-  // live /spec endpoint with a disk-cache fallback). All spec-dependent registration
-  // happens inside the loader service's start() so it can await the fetch.
   // Platform tools (venues, claim, oauth) need no spec — registered synchronously.
-  for (const tool of [venuesTool(cfg), agentmessierClaimTool(cfg), ...oauthTools(cfg)]) {
+  //
+  // Venue tools (soccer_join/soccer_create/…) MUST be registered synchronously
+  // HERE too, from the disk-cache/baked spec (defaultVenueToolsSync, no network).
+  // OpenClaw snapshots a plugin's tool surface at registration time: a tool
+  // registered LATER (from inside the loader service's async start(), which is
+  // where the LIVE-spec defaultVenueTools used to run) shows up in
+  // `tools.catalog` but NEVER reaches the agent's callable list
+  // (`tools.effective`). Found live 2026-07-14: the agent couldn't call
+  // soccer_create and fell back to raw curl against the pitch API (leaking a
+  // manager key it should never have surfaced). The generated tool handlers are
+  // closures that read LIVE state (venueUrl, seat, session) at call time, so a
+  // tool built from the cached/baked spec still drives the live server — only
+  // the spec's action VOCABULARY could be stale, which start() refreshes on disk
+  // for the next boot. (registerTool APPENDS — verified in the host's registry
+  // source — so start() must NOT re-register these, or every tool doubles.)
+  for (const tool of [venuesTool(cfg), agentmessierClaimTool(cfg), ...oauthTools(cfg), ...defaultVenueToolsSync(cfg)]) {
     api.registerTool(tool as AnyAgentTool);
   }
 
@@ -63,16 +75,20 @@ export default function register(api: OpenClawPluginApi) {
     id: "agentmessier-loader",
 
     start: async (ctx) => {
-      // 1. Venue lifecycle tools (soccer_join/observe/play, work_observe/act, …):
-      //    fetch each venue's /spec live, write to disk cache, generate tools from
-      //    the live spec. On network failure the disk cache is the fallback, then
-      //    the baked default spec — venue tools always load for known venues.
+      // 1. Warm the disk spec cache from the LIVE /spec (fetch → write cache).
+      //    The agent-callable venue tools were ALREADY registered synchronously
+      //    in register() above — that is what makes them reachable, and the host
+      //    registry APPENDS on registerTool (verified in its source), so we must
+      //    NOT register them again here or every tool would double. This pass
+      //    exists only so the NEXT cold start's synchronous registration sees a
+      //    fresh spec (its cache-first path), and so the autoplay watchers below
+      //    seat against the live routes. defaultVenueTools does the fetch+cache
+      //    write as a side effect; we discard its returned tool objects.
       const venueTools = await defaultVenueTools(cfg);
       if (venueTools.length === 0) {
-        ctx.logger.warn("[agentmessier] spec unavailable — venue tools not loaded; connect to the pitch once to cache the spec");
+        ctx.logger.warn("[agentmessier] live spec unavailable — venue tools running on the cached/baked spec registered at boot");
       } else {
-        for (const tool of venueTools) api.registerTool(tool as AnyAgentTool);
-        ctx.logger.info(`[agentmessier] loaded ${venueTools.length} venue tools from live spec`);
+        ctx.logger.info(`[agentmessier] refreshed spec cache for ${venueTools.length} venue tools from live spec`);
       }
 
       // 2. Autoplay watchers — ONE cadence-gated polling loop per realtime venue,
