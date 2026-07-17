@@ -1,6 +1,7 @@
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { venuesTool, agentmessierClaimTool, agentIdOf, identityOf, venueUrl, type PluginCfg, type GameSpec } from "./src/tools.js";
 import { defaultVenueTools, defaultVenueToolsSync, defaultRealtimeVenues, joinVenue, resumeVenue, setVenueState, type Venue } from "./src/generate.js";
+import { umbrellaRegister, buildUmbrellaTool } from "./src/umbrella.js";
 import { startCadenceWatcher } from "./src/watcher.js";
 import { session, createSession, type RuntimeSession } from "./src/state.js";
 import { playTurn, playTurnViaSubagent, type LlmComplete } from "./src/decide.js";
@@ -57,7 +58,16 @@ export default function register(api: OpenClawPluginApi) {
   // the spec's action VOCABULARY could be stale, which start() refreshes on disk
   // for the next boot. (registerTool APPENDS — verified in the host's registry
   // source — so start() must NOT re-register these, or every tool doubles.)
-  for (const tool of [venuesTool(cfg), agentmessierClaimTool(cfg), ...oauthTools(cfg), ...defaultVenueToolsSync(cfg)]) {
+  // The `agentmessier` umbrella (src/umbrella.ts, docs/design/
+  // openclaw-umbrella-tool.md) routes command→tool over the SAME array —
+  // one alsoAllow entry ('["agentmessier"]') covers everything, and future
+  // granular tools are reachable on per-tool-allowlist hosts without any
+  // allowlist change. Seed the delegation table BEFORE building the
+  // umbrella (its description enumerates the commands), and register the
+  // umbrella exactly once, here — never in start() (host appends, no dedup).
+  const granular = [venuesTool(cfg), agentmessierClaimTool(cfg), ...oauthTools(cfg), ...defaultVenueToolsSync(cfg)];
+  umbrellaRegister(granular);
+  for (const tool of [...granular, buildUmbrellaTool()]) {
     api.registerTool(tool as AnyAgentTool);
   }
 
@@ -83,12 +93,19 @@ export default function register(api: OpenClawPluginApi) {
       //    exists only so the NEXT cold start's synchronous registration sees a
       //    fresh spec (its cache-first path), and so the autoplay watchers below
       //    seat against the live routes. defaultVenueTools does the fetch+cache
-      //    write as a side effect; we discard its returned tool objects.
+      //    write as a side effect; its returned tool objects go ONLY into the
+      //    umbrella's delegation table (a plain Map — NOT the host registry,
+      //    which appends without dedup). The umbrella's name/schema were
+      //    snapshotted at register(); refreshing where its calls ROUTE is
+      //    invisible to the host, so live-spec tools (even a venue that
+      //    didn't exist when this plugin version shipped) become reachable
+      //    through `agentmessier` without a re-register.
       const venueTools = await defaultVenueTools(cfg);
       if (venueTools.length === 0) {
         ctx.logger.warn("[agentmessier] live spec unavailable — venue tools running on the cached/baked spec registered at boot");
       } else {
-        ctx.logger.info(`[agentmessier] refreshed spec cache for ${venueTools.length} venue tools from live spec`);
+        umbrellaRegister(venueTools as AnyAgentTool[]);
+        ctx.logger.info(`[agentmessier] refreshed spec cache + umbrella routing for ${venueTools.length} venue tools from live spec`);
       }
 
       // 2. Autoplay watchers — ONE cadence-gated polling loop per realtime venue,

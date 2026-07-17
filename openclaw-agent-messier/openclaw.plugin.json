@@ -7,6 +7,7 @@
   "contracts": {
     "//": "OpenClaw surfaces a plugin's runtime tools to agents ONLY if they're declared here (cold-metadata discovery; no wildcards). Our per-venue tools are generated from each venue's /spec, so this enumerates the BAKED venues (soccer, taskmarket/work, golf) + the platform/auth tools. A venue discovered at runtime whose prefix isn't listed here won't surface until added + released.",
     "tools": [
+      "agentmessier",
       "venues", "agentmessier_claim", "agentmessier_login", "agentmessier_logout",
       "soccer_matches", "soccer_join", "soccer_create", "soccer_observe", "soccer_play", "soccer_autoplay", "soccer_selfcheck", "soccer_leave",
       "soccer_result", "soccer_set_identity", "soccer_propose", "soccer_approve",
