@@ -109,6 +109,19 @@ export function jittered(ms: number): number {
 export const WATCHDOG_INTERVAL_MS = 30_000;
 export const WATCHDOG_STALL_MS = 60_000;
 
+/** Reclaim-storm guard (found live 2026-07-14/17): a pitch/gateway restart
+ *  could leave the loop 404ing every tick, and each onReclaim whose seatRoute
+ *  ALSO 404s falls back to a fresh POST /quickmatch — which the gateway
+ *  routes as `assign` and pre-allocates a match id for, burning one sequence
+ *  id per tick (795 ids in 52 minutes on 2026-07-14; ledger-verified). The
+ *  loop never converged because a "successful" reclaim was trusted blindly —
+ *  only the NEXT poll proves recovery. So: consecutive 404s back off
+ *  exponentially (cadence → ×2 → … capped) and give up entirely after
+ *  MAX_CONSECUTIVE_RECLAIMS, going idle instead of hammering forever. Any
+ *  non-404 poll result resets the streak. */
+export const MAX_CONSECUTIVE_RECLAIMS = 5;
+export const RECLAIM_BACKOFF_CAP_MS = 60_000;
+
 /**
  * Run the cadence loop until aborted. Each tick: poll state → guard → play →
  * wait(cadence). A 404 triggers onReclaim; an ended/empty view is skipped (no
@@ -133,6 +146,7 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
   // say exactly which stage it froze in and for how long. With debug on, it
   // also emits a periodic alive heartbeat while healthy.
   let tick = 0;
+  let reclaimStreak = 0;
   let stage = "starting";
   let stageSince = Date.now();
   const setStage = (s: string) => { stage = s; stageSince = Date.now(); };
@@ -188,13 +202,24 @@ export async function startCadenceWatcher(cfg: CadenceCfg, options: CadenceOptio
         ...(options.fetch ? { fetchImpl: options.fetch } : {}),
       });
       if (r.status === 404) {
-        // Server forgot us (restart) or the room is gone — re-claim, then poll again.
+        // Server forgot us (restart) or the room is gone — re-claim, then poll
+        // again. A reclaim only counts as recovered when a LATER poll returns
+        // non-404 (the streak reset below) — a 2xx from the reclaim call itself
+        // proved nothing on 2026-07-14 (see MAX_CONSECUTIVE_RECLAIMS).
+        reclaimStreak++;
+        if (reclaimStreak > MAX_CONSECUTIVE_RECLAIMS) {
+          logger?.warn(`[${label}] ${MAX_CONSECUTIVE_RECLAIMS} consecutive reclaims never restored the seat in ${cfg.matchId} — giving up (idle; rejoin to play again)`);
+          if (options.onEnded) { try { await options.onEnded(); } catch { /* idle handoff must never throw */ } }
+          return;
+        }
         if (options.onReclaim) {
           try { await options.onReclaim(); } catch (e) { logger?.warn(`[${label}] re-claim failed: ${String(e)}`); }
         }
-        await wait(jittered(cadence), signal);
+        const backoff = Math.min(cadence * 2 ** (reclaimStreak - 1), RECLAIM_BACKOFF_CAP_MS);
+        await wait(jittered(backoff), signal);
         continue;
       }
+      reclaimStreak = 0; // any non-404 answer = the server knows this room again
       if (!r.ok) {
         // Any other non-2xx (401/403/5xx) — surface it. Previously this left
         // `view` null with no log and no failure counting, so a persistent
