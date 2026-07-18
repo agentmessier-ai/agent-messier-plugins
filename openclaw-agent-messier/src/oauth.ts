@@ -200,10 +200,25 @@ async function doRefresh(cfg: PluginCfg, refreshToken: string): Promise<string |
 }
 
 // ── browser login flow ──
-function openBrowser(url: string): void {
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  try { spawn(cmd, args, { stdio: "ignore", detached: true }).unref(); } catch { /* user copies the URL */ }
+// ClawHub's static scan (suspicious.dangerous_exec) flagged this: url is built
+// from the configurable accountsUrl, and the old Windows path (`cmd /c start
+// "" url`) hands it to cmd.exe, which DOES parse shell metacharacters (&, |,
+// ") in its command line — a malicious accountsUrl could inject commands
+// there even though spawn() itself never invokes a shell. Fixed two ways:
+// (1) reject anything that isn't a well-formed http(s) URL before it reaches
+// spawn at all, and (2) use `explorer.exe <url>` on Windows instead of `cmd /c
+// start` — explorer takes the URL as a plain argv, with no shell parsing.
+export function openBrowser(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return; // not a real URL — refuse to hand it to any OS opener; caller logs it for the user to copy
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  const safeUrl = parsed.toString();
+  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+  try { spawn(cmd, [safeUrl], { stdio: "ignore", detached: true }).unref(); } catch { /* user copies the URL */ }
 }
 
 /** Start an ephemeral localhost callback server. `ready` resolves with the bound
