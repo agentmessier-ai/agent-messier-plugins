@@ -206,8 +206,10 @@ async function doRefresh(cfg: PluginCfg, refreshToken: string): Promise<string |
 // ") in its command line — a malicious accountsUrl could inject commands
 // there even though spawn() itself never invokes a shell. Fixed two ways:
 // (1) reject anything that isn't a well-formed http(s) URL before it reaches
-// spawn at all, and (2) use `explorer.exe <url>` on Windows instead of `cmd /c
-// start` — explorer takes the URL as a plain argv, with no shell parsing.
+// spawn at all, and (2) on Windows, use `rundll32 url.dll,FileProtocolHandler
+// <url>` — the exact pattern OpenClaw's own core uses for browser-opening
+// (src/infra/browser-open.ts) — instead of `cmd /c start`, so the URL is a
+// plain argv with no shell parsing at all.
 export function openBrowser(url: string): void {
   let parsed: URL;
   try {
@@ -217,8 +219,17 @@ export function openBrowser(url: string): void {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
   const safeUrl = parsed.toString();
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
-  try { spawn(cmd, [safeUrl], { stdio: "ignore", detached: true }).unref(); } catch { /* user copies the URL */ }
+  // open/xdg-open/rundll32 are fixed, well-known OS launcher utilities resolved
+  // by name (same as OpenClaw core's own browser-open.ts); there's no portable
+  // absolute path across macOS/Linux distros, and the URL argument itself is
+  // already validated as http(s) above.
+  /* eslint-disable sonarjs/no-os-command-from-path */
+  try {
+    if (process.platform === "darwin") spawn("open", [safeUrl], { stdio: "ignore", detached: true }).unref();
+    else if (process.platform === "win32") spawn("rundll32", ["url.dll,FileProtocolHandler", safeUrl], { stdio: "ignore", detached: true }).unref();
+    else spawn("xdg-open", [safeUrl], { stdio: "ignore", detached: true }).unref();
+  } catch { /* user copies the URL */ }
+  /* eslint-enable sonarjs/no-os-command-from-path */
 }
 
 /** Start an ephemeral localhost callback server. `ready` resolves with the bound
