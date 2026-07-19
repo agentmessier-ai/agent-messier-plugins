@@ -23,7 +23,7 @@ from . import client as C
 # STATIC FALLBACK — used only when no spec is available (old server / network
 # loss). High-level verbs only; raw run/kick excluded (geometry is NaN-prone
 # without server guidance).
-ACTIONS = ["chase", "shoot", "dribble", "pass", "defend", "press", "cover", "idle"]
+ACTIONS = ["chase", "shoot", "dribble", "pass", "lob-pass", "long-ball", "defend", "press", "cover", "idle"]
 FALLBACK_INSTRUCTIONS = {
     "system": "You are a decisive soccer tactician. Output only JSON. Be fast.",
     "play": (
